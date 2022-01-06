@@ -13,7 +13,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/influxdata/influxdb/cmd/influxd/backup_util"
@@ -21,6 +23,7 @@ import (
 	"github.com/influxdata/influxdb/services/snapshotter"
 	"github.com/influxdata/influxdb/tcp"
 	gzip "github.com/klauspost/pgzip"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -60,8 +63,10 @@ type Command struct {
 	manifest         backup_util.Manifest
 	portableFileBase string
 	continueOnError  bool
+	concurrency      int
 
 	BackupFiles []string
+	mu          sync.Mutex
 }
 
 // NewCommand returns a new instance of Command with default settings.
@@ -127,7 +132,7 @@ func (cmd *Command) Run(args ...string) error {
 			cmd.StderrLogger.Printf("manifest save failed: %v", err)
 			return err
 		}
-		cmd.BackupFiles = append(cmd.BackupFiles, filename)
+		cmd.addBackupFile(filename)
 	}
 
 	if err != nil {
@@ -160,6 +165,7 @@ func (cmd *Command) parseFlags(args []string) (err error) {
 	fs.StringVar(&endArg, "end", "", "")
 	fs.BoolVar(&cmd.portable, "portable", false, "")
 	fs.BoolVar(&cmd.continueOnError, "skip-errors", false, "")
+	fs.IntVar(&cmd.concurrency, "concurrency", 0, "")
 
 	fs.SetOutput(cmd.Stderr)
 	fs.Usage = cmd.printUsage
@@ -206,6 +212,15 @@ func (cmd *Command) parseFlags(args []string) (err error) {
 		if !cmd.start.Before(cmd.end) {
 			return errors.New("start date must be before end date")
 		}
+	}
+
+	// concurrency of zero means dynamically scaled by CPU count
+	if cmd.concurrency == 0 {
+		cmd.concurrency = runtime.NumCPU() / 2
+	}
+
+	if cmd.concurrency < 1 {
+		cmd.concurrency = 1
 	}
 
 	// Ensure that only one arg is specified.
@@ -259,7 +274,7 @@ func (cmd *Command) backupShard(db, rp, sid string) (err error) {
 		return err
 	}
 	if !cmd.portable {
-		cmd.BackupFiles = append(cmd.BackupFiles, shardArchivePath)
+		cmd.addBackupFile(shardArchivePath)
 	}
 
 	if cmd.portable {
@@ -320,7 +335,7 @@ func (cmd *Command) backupShard(db, rp, sid string) (err error) {
 			LastModified: 0,
 		})
 
-		cmd.BackupFiles = append(cmd.BackupFiles, filename)
+		cmd.addBackupFile(filename)
 	}
 	return nil
 
@@ -329,7 +344,9 @@ func (cmd *Command) backupShard(db, rp, sid string) (err error) {
 // backupDatabase will request the database information from the server and then backup
 // every shard in every retention policy in the database. Each shard will be written to a separate file.
 func (cmd *Command) backupDatabase() error {
-	cmd.StdoutLogger.Printf("backing up db=%s", cmd.database)
+	if cmd.database != "" {
+		cmd.StdoutLogger.Printf("backing up db=%s", cmd.database)
+	}
 
 	req := &snapshotter.Request{
 		Type:           snapshotter.RequestDatabaseInfo,
@@ -368,24 +385,44 @@ func (cmd *Command) backupRetentionPolicy() error {
 	return cmd.backupResponsePaths(response)
 }
 
-// backupResponsePaths will backup all shards identified by shard paths in the response struct
+// backupResponsePaths will back up all shards identified by shard paths in the response struct
 func (cmd *Command) backupResponsePaths(response *snapshotter.Response) error {
-
+	var g *errgroup.Group
 	// loop through the returned paths and back up each shard
-	for _, path := range response.Paths {
+	// run cmd.concurrency backups simultaneously
+	for i, path := range response.Paths {
+		if (i % cmd.concurrency) == 0 {
+			g = new(errgroup.Group)
+		}
 		db, rp, id, err := backup_util.DBRetentionAndShardFromPath(path)
 		if err != nil {
 			return err
 		}
 
-		err = cmd.backupShard(db, rp, id)
+		g.Go(func() error {
+			err = cmd.backupShard(db, rp, id)
 
-		if err != nil && !cmd.continueOnError {
-			cmd.StderrLogger.Printf("error (%s) when backing up db: %s, rp %s, shard %s. continuing backup on remaining shards", err, db, rp, id)
-			return err
+			if err != nil {
+				err = fmt.Errorf("error when backing up db %s, rp %s, shard %s: %w", db, rp, id, err)
+				if !cmd.continueOnError {
+					return err
+				} else {
+					cmd.StderrLogger.Printf("%s. continuing backup on remaining shards", err.Error())
+				}
+			}
+			return nil
+		})
+		if (i % cmd.concurrency) == (cmd.concurrency - 1) {
+			err := g.Wait()
+			g = nil
+			if err != nil {
+				return err
+			}
 		}
 	}
-
+	if g != nil {
+		return g.Wait()
+	}
 	return nil
 }
 
@@ -434,7 +471,7 @@ func (cmd *Command) backupMetastore() (retErr error) {
 	}
 
 	if !cmd.portable {
-		cmd.BackupFiles = append(cmd.BackupFiles, metastoreArchivePath)
+		cmd.addBackupFile(metastoreArchivePath)
 	}
 
 	if cmd.portable {
@@ -456,7 +493,7 @@ func (cmd *Command) backupMetastore() (retErr error) {
 
 		cmd.manifest.Meta.FileName = filename
 		cmd.manifest.Meta.Size = int64(len(metaBytes))
-		cmd.BackupFiles = append(cmd.BackupFiles, filename)
+		cmd.addBackupFile(filename)
 	}
 
 	return nil
@@ -625,6 +662,13 @@ Usage: influxd backup [options] PATH
             Recommend using '-start <timestamp>' instead.
     -skip-errors 
             Optional flag to continue backing up the remaining shards when the current shard fails to backup. 
+    -concurrency <number>
+            Optional flag to control concurrency of backups. The default, zero, uses 1/4 of the number of CPUs.
 `)
+}
 
+func (cmd *Command) addBackupFile(f string) {
+	cmd.mu.Lock()
+	defer cmd.mu.Unlock()
+	cmd.BackupFiles = append(cmd.BackupFiles, f)
 }
