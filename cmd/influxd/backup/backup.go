@@ -2,6 +2,7 @@
 package backup
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -387,41 +388,60 @@ func (cmd *Command) backupRetentionPolicy() error {
 
 // backupResponsePaths will back up all shards identified by shard paths in the response struct
 func (cmd *Command) backupResponsePaths(response *snapshotter.Response) error {
-	var g *errgroup.Group
+	cctx, cancelFunc := context.WithCancel(context.Background())
+	g, ctx := errgroup.WithContext(cctx)
+	ch := make(chan string)
+
+	go cmd.backupPaths(g, ch, cancelFunc, ctx)
 	// loop through the returned paths and back up each shard
 	// run cmd.concurrency backups simultaneously
-	for i, path := range response.Paths {
-		if (i % cmd.concurrency) == 0 {
-			g = new(errgroup.Group)
-		}
-		db, rp, id, err := backup_util.DBRetentionAndShardFromPath(path)
-		if err != nil {
-			return err
-		}
-
-		g.Go(func() error {
-			err = cmd.backupShard(db, rp, id)
-
-			if err != nil {
-				err = fmt.Errorf("error when backing up db %s, rp %s, shard %s: %w", db, rp, id, err)
-				if !cmd.continueOnError {
-					return err
-				} else {
-					cmd.StderrLogger.Printf("%s. continuing backup on remaining shards", err.Error())
-				}
-			}
-			return nil
-		})
-		if (i % cmd.concurrency) == (cmd.concurrency - 1) {
-			err := g.Wait()
-			g = nil
-			if err != nil {
-				return err
-			}
+PathLoop:
+	for _, path := range response.Paths {
+		select {
+		case <-ctx.Done():
+			break PathLoop
+		case ch <- path:
 		}
 	}
-	if g != nil {
-		return g.Wait()
+	close(ch)
+	return g.Wait()
+}
+func (cmd *Command) backupPaths(g *errgroup.Group, ch <-chan string, cancelFunc context.CancelFunc, ctx context.Context) error {
+	semaphore := make(chan struct{}, cmd.concurrency)
+	for {
+		select {
+		case <-ctx.Done():
+			// a sibling erred
+			return nil
+		case path, ok := <-ch:
+			if !ok {
+				// finished the loop
+				return nil
+			}
+			g.Go(func() error {
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }()
+				db, rp, id, err := backup_util.DBRetentionAndShardFromPath(path)
+				defer cmd.StdoutLogger.Printf("finished backing up db %s, rp %s, shard %s", db, rp, id)
+				if err != nil {
+					// this is a fatal error
+					cancelFunc()
+					return err
+				}
+				err = cmd.backupShard(db, rp, id)
+
+				if err != nil {
+					err = fmt.Errorf("error when backing up db %s, rp %s, shard %s: %w", db, rp, id, err)
+					if !cmd.continueOnError {
+						cancelFunc()
+						return err
+					} else {
+						cmd.StderrLogger.Printf("%s. continuing backup on remaining shards", err.Error())
+					}
+				}
+				return nil
+			})
+		}
 	}
 	return nil
 }
