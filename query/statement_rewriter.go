@@ -8,6 +8,8 @@ import (
 )
 
 // RewriteStatement rewrites stmt into a new statement, if applicable.
+// 如果可以的话(也就是如果是show类型语句的话)，将stmt重写为一个新的语句
+// 因为原始存储在_internal表里，所以针对show类型语句要转换成标准的measurement查询语句
 func RewriteStatement(stmt influxql.Statement) (influxql.Statement, error) {
 	switch stmt := stmt.(type) {
 	case *influxql.ShowFieldKeysStatement:

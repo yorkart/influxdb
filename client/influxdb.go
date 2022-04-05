@@ -62,6 +62,9 @@ type Query struct {
 	// nodes to retrieve all of the data. On a database where the number of data nodes
 	// is greater than the replication factor, it is expected that setting this option
 	// will only retrieve partial data.
+	// OSS版本有效，忽略。
+	// NodeID设置用于查询结果的数据节点。此选项仅在软件的企业版本中有效，在企业版本中可以有多个数据节点，主要用于分析数据差异。
+	// 默认的行为是自动选择适当的数据节点来检索所有数据。对于数据节点数量大于复制因子的数据库，预期设置此选项将仅检索部分数据。
 	NodeID int
 }
 

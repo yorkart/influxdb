@@ -32,18 +32,23 @@ type pointsWriter interface {
 
 // StatementExecutor executes a statement in the query.
 type StatementExecutor struct {
+	// MetaClient DB元数据管理接口
 	MetaClient MetaClient
 
 	// TaskManager holds the StatementExecutor that handles task-related commands.
+	// 主要用来执行Task相关的语句
 	TaskManager query.StatementExecutor
 
 	// TSDB storage for local node.
+	// 本地存储操作的管理接口
 	TSDBStore TSDBStore
 
 	// ShardMapper for mapping shards when executing a SELECT statement.
+	// 根据查询的measurement、时间范围等条件，计算出查询会覆盖到的shard
 	ShardMapper query.ShardMapper
 
 	// Holds monitoring data for SHOW STATS and SHOW DIAGNOSTICS.
+	// 提供监控类数据，用于监控类语句的执行
 	Monitor *monitor.Monitor
 
 	// Used for rewriting points back into system for SELECT INTO statements.
@@ -61,6 +66,7 @@ type StatementExecutor struct {
 }
 
 // ExecuteStatement executes the given statement with the given execution context.
+// 标准InfluxQL语句执行入口
 func (e *StatementExecutor) ExecuteStatement(ctx *query.ExecutionContext, stmt influxql.Statement) error {
 	// Select statements are handled separately so that they can be streamed.
 	if stmt, ok := stmt.(*influxql.SelectStatement); ok {
@@ -541,6 +547,7 @@ func (e *StatementExecutor) executeSetPasswordUserStatement(q *influxql.SetPassw
 	return e.MetaClient.UpdateUser(q.Name, q.Password)
 }
 
+// executeSelectStatement 执行select语句
 func (e *StatementExecutor) executeSelectStatement(ctx *query.ExecutionContext, stmt *influxql.SelectStatement) error {
 	cur, err := e.createIterators(ctx, stmt, ctx.ExecutionOptions)
 	if err != nil {
@@ -556,6 +563,7 @@ func (e *StatementExecutor) executeSelectStatement(ctx *query.ExecutionContext, 
 	var emitted bool
 
 	var pointsWriter *BufferedPointsWriter
+	// 是否为select into语句
 	if stmt.Target != nil {
 		pointsWriter = NewBufferedPointsWriter(e.PointsWriter, stmt.Target.Measurement.Database, stmt.Target.Measurement.RetentionPolicy, 10000)
 	}
@@ -1274,6 +1282,8 @@ func convertRowToPoints(measurementName string, row *models.Row, strictErrorHand
 
 // NormalizeStatement adds a default database and policy to the measurements in statement.
 // Parameter defaultRetentionPolicy can be "".
+// 将默认的database 和 policy添加到measurement语句。
+// 如果有一个条语句验证失败，则后续都不在执行
 func (e *StatementExecutor) NormalizeStatement(stmt influxql.Statement, defaultDatabase, defaultRetentionPolicy string) (err error) {
 	influxql.WalkFunc(stmt, func(node influxql.Node) {
 		if err != nil {

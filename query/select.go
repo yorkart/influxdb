@@ -21,12 +21,15 @@ var DefaultTypeMapper = influxql.MultiTypeMapper(
 )
 
 // SelectOptions are options that customize the select call.
+// select语句执行参数
 type SelectOptions struct {
 	// Authorizer is used to limit access to data
+	// OSS版本忽略
 	Authorizer FineAuthorizer
 
 	// Node to exclusively read from.
 	// If zero, all nodes are used.
+	// OSS版本忽略
 	NodeID uint64
 
 	// Maximum number of concurrent series.
@@ -63,11 +66,13 @@ type ShardGroup interface {
 }
 
 // Select is a prepared statement that is ready to be executed.
+// 预声明执行语句
 type PreparedStatement interface {
 	// Select creates the Iterators that will be used to read the query.
 	Select(ctx context.Context) (Cursor, error)
 
 	// Explain outputs the explain plan for this statement.
+	// 输出语句解释的执行计划
 	Explain() (string, error)
 
 	// Close closes the resources associated with this prepared statement.
@@ -79,6 +84,7 @@ type PreparedStatement interface {
 // Prepare will compile the statement with the default compile options and
 // then prepare the query.
 func Prepare(stmt *influxql.SelectStatement, shardMapper ShardMapper, opt SelectOptions) (PreparedStatement, error) {
+	// 语句编译，提取、变换相关语句和属性
 	c, err := Compile(stmt, CompileOptions{})
 	if err != nil {
 		return nil, err

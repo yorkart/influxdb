@@ -60,12 +60,15 @@ func (t *TaskStatus) UnmarshalJSON(data []byte) error {
 }
 
 // TaskManager takes care of all aspects related to managing running queries.
+// 负责管理所有的请求任务，对任务封装成Task，并对Task生命周期进行管理，并提供Task的show和kill语句支持
 type TaskManager struct {
 	// Query execution timeout.
+	// 请求超时时间
 	QueryTimeout time.Duration
 
 	// Log queries if they are slower than this time.
 	// If zero, slow queries will never be logged.
+	// 执行时间如果超过LogQueriesAfter，则日志记录本次请求
 	LogQueriesAfter time.Duration
 
 	// Maximum number of concurrent queries.
@@ -93,6 +96,7 @@ func NewTaskManager() *TaskManager {
 }
 
 // ExecuteStatement executes a statement containing one of the task management queries.
+// 执行 Task 列表和kill Task 两个语句
 func (t *TaskManager) ExecuteStatement(ctx *ExecutionContext, stmt influxql.Statement) error {
 	switch stmt := stmt.(type) {
 	case *influxql.ShowQueriesStatement:
@@ -126,6 +130,7 @@ func (t *TaskManager) executeKillQueryStatement(stmt *influxql.KillQueryStatemen
 	return t.KillQuery(stmt.QueryID)
 }
 
+// executeShowQueriesStatement 执行返回正在执行的请求语句
 func (t *TaskManager) executeShowQueriesStatement(q *influxql.ShowQueriesStatement) (models.Rows, error) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -154,6 +159,7 @@ func (t *TaskManager) executeShowQueriesStatement(q *influxql.ShowQueriesStateme
 	}}, nil
 }
 
+// queryError 绑定错误到该任务的Task.err属性
 func (t *TaskManager) queryError(qid uint64, err error) {
 	t.mu.RLock()
 	query := t.queries[qid]
@@ -170,18 +176,27 @@ func (t *TaskManager) queryError(qid uint64, err error) {
 // query finishes running.
 //
 // After a query finishes running, the system is free to reuse a query id.
+// 附加由TaskManager管理的正在运行的查询。返回新附加查询的查询id，如果无法分配查询id或无法将查询附加到TaskManager，则返回错误。
+// 此函数还返回一个通道，该通道将在此查询结束运行时关闭。
+// 如果一个查询结束运行，系统会释放query id，并且可以重用。
+//
+// 对请求包装成Task，放到请求列表中。开启异步监控Task的执行事件（各种造成终止的事件），并返回ExecutionContext上下文，
+// 调用方可以根据context.Done()判断Task是否完成
 func (t *TaskManager) AttachQuery(q *influxql.Query, opt ExecutionOptions, interrupt <-chan struct{}) (*ExecutionContext, func(), error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// 如果执行器已经shutdown，直接报错
 	if t.shutdown {
 		return nil, nil, ErrQueryEngineShutdown
 	}
 
+	// 最大并非查询控制，超出阈值报错
 	if t.MaxConcurrentQueries > 0 && len(t.queries) >= t.MaxConcurrentQueries {
 		return nil, nil, ErrMaxConcurrentQueriesLimitExceeded(len(t.queries), t.MaxConcurrentQueries)
 	}
 
+	// 构造查询任务的Task实例
 	qid := t.nextID
 	query := &Task{
 		query:     q.String(),
@@ -193,21 +208,28 @@ func (t *TaskManager) AttachQuery(q *influxql.Query, opt ExecutionOptions, inter
 	}
 	t.queries[qid] = query
 
+	// 异步执行：监听任务的查询超时、监控异常推送、查询终止事件，如果异常把err维护到Task并kill任务
 	go t.waitForQuery(qid, query.closing, interrupt, query.monitorCh)
+	// 异步检测：添加monitor任务，如果查询超时，进行日志记录。
+	// 只是为了日志记录
 	if t.LogQueriesAfter != 0 {
 		go query.monitor(func(closing <-chan struct{}) error {
+			// 查询超时定时器
 			timer := time.NewTimer(t.LogQueriesAfter)
 			defer timer.Stop()
 
 			select {
 			case <-timer.C:
+				// 超时日志记录
 				t.Logger.Warn(fmt.Sprintf("Detected slow query: %s (qid: %d, database: %s, threshold: %s)",
 					query.query, qid, query.database, t.LogQueriesAfter))
 			case <-closing:
+				// 查询执行结束
 			}
 			return nil
 		})
 	}
+	// 任务id递增，golang这种++操作，内存可见性没问题吗？
 	t.nextID++
 
 	ctx := &ExecutionContext{
@@ -216,6 +238,7 @@ func (t *TaskManager) AttachQuery(q *influxql.Query, opt ExecutionOptions, inter
 		task:             query,
 		ExecutionOptions: opt,
 	}
+	// 异步监听：维护Context装，维护Task终止事件结果到Context
 	ctx.watch()
 	return ctx, func() { t.DetachQuery(qid) }, nil
 }
@@ -223,6 +246,7 @@ func (t *TaskManager) AttachQuery(q *influxql.Query, opt ExecutionOptions, inter
 // KillQuery enters a query into the killed state and closes the channel
 // from the TaskManager. This method can be used to forcefully terminate a
 // running query.
+// 强制中断查询。把一次查询标记为kill状态，并关闭 Task.closing
 func (t *TaskManager) KillQuery(qid uint64) error {
 	t.mu.Lock()
 	query := t.queries[qid]
@@ -231,11 +255,13 @@ func (t *TaskManager) KillQuery(qid uint64) error {
 	if query == nil {
 		return fmt.Errorf("no such query id: %d", qid)
 	}
+	// 调用kill()，标记本次查询状态为KilledTask
 	return query.kill()
 }
 
 // DetachQuery removes a query from the query table. If the query is not in the
 // killed state, this will also close the related channel.
+// 从t.queries移除Task，并close该任务
 func (t *TaskManager) DetachQuery(qid uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -278,7 +304,9 @@ func (t *TaskManager) Queries() []QueryInfo {
 	return queries
 }
 
+// waitForQuery 监听查询超时、监控异常推送、查询终止事件，如果异常把err维护到Task并kill任务
 func (t *TaskManager) waitForQuery(qid uint64, interrupt <-chan struct{}, closing <-chan struct{}, monitorCh <-chan error) {
+	// 超时定时器
 	var timerCh <-chan time.Time
 	if t.QueryTimeout != 0 {
 		timer := time.NewTimer(t.QueryTimeout)
@@ -286,21 +314,27 @@ func (t *TaskManager) waitForQuery(qid uint64, interrupt <-chan struct{}, closin
 		defer timer.Stop()
 	}
 
+	// 查询结果事件检测
 	select {
 	case <-closing:
+		// 查询中断（http断开连接等），标记Task.err
 		t.queryError(qid, ErrQueryInterrupted)
 	case err := <-monitorCh:
+		// 收到查询过程中的error错误推送
 		if err == nil {
 			break
 		}
-
+		// 标记Task.err
 		t.queryError(qid, err)
 	case <-timerCh:
+		// 超时，标记Task.err
 		t.queryError(qid, ErrQueryTimeoutLimitExceeded)
 	case <-interrupt:
 		// Query was manually closed so exit the select.
+		// 手动关闭，通过关闭Task.closing
 		return
 	}
+	// kill本次查询
 	t.KillQuery(qid)
 }
 

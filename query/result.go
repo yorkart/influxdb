@@ -83,9 +83,11 @@ func ReadOnlyWarning(stmt string) *Message {
 
 // Result represents a resultset returned from a single statement.
 // Rows represents a list of rows that can be sorted consistently by name/tag.
+// 描述单个语句执行结果集
 type Result struct {
 	// StatementID is just the statement's position in the query. It's used
 	// to combine statement results if they're being buffered in memory.
+	// 请求里每条语句一个id（就是语句的索引下标）
 	StatementID int
 	Series      models.Rows
 	Messages    []*Message
