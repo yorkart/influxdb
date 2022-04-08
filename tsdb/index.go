@@ -798,6 +798,7 @@ type seriesPointIterator struct {
 // newSeriesPointIterator returns a new instance of seriesPointIterator.
 func NewSeriesPointIterator(indexSet IndexSet, opt query.IteratorOptions) (_ query.Iterator, err error) {
 	// Only equality operators are allowed.
+	// 检查可以支持的比较操作
 	influxql.WalkFunc(opt.Condition, func(n influxql.Node) {
 		switch n := n.(type) {
 		case *influxql.BinaryExpr:

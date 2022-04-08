@@ -53,7 +53,7 @@ type LogFile struct {
 	data       []byte         // mmap
 	file       *os.File       // writer
 	w          *bufio.Writer  // buffered writer
-	bufferSize int            // The size of the buffer used by the buffered writer
+	bufferSize int            // The size of the buffer used by the buffered writer 默认 defaultLogFileBufferSize
 	nosync     bool           // Disables buffer flushing and file syncing. Useful for offline tooling.
 	buf        []byte         // marshaling buffer
 	keyBuf     []byte

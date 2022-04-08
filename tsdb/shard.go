@@ -435,9 +435,11 @@ func (s *Shard) LastModified() time.Time {
 
 // Index returns a reference to the underlying index. It returns an error if
 // the index is nil.
+// 返回index的引用
 func (s *Shard) Index() (Index, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// engine是否启动，状态是否ok
 	if err := s.ready(); err != nil {
 		return nil, err
 	}
@@ -899,6 +901,7 @@ func (s *Shard) WriteTo(w io.Writer) (int64, error) {
 }
 
 // CreateIterator returns an iterator for the data in the shard.
+// 创建shard数据的Iterator
 func (s *Shard) CreateIterator(ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions) (query.Iterator, error) {
 	engine, err := s.Engine()
 	if err != nil {
@@ -1246,6 +1249,7 @@ func (s *Shard) engineNoLock() (Engine, error) {
 	return s._engine, nil
 }
 
+// ShardGroup 是对一次查询所涉及shard的描述
 type ShardGroup interface {
 	MeasurementsByRegex(re *regexp.Regexp) []string
 	FieldKeysByMeasurement(name []byte) []string
@@ -1391,7 +1395,11 @@ func (a Shards) CallType(name string, args []influxql.DataType) (influxql.DataTy
 	return typmap.CallType(name, args)
 }
 
+// CreateIterator 创建measurement下的数据筛选Iterator
+// _series: tsdb.seriesPointIterator ->  tsdb.measurementMergeIterator -> MeasurementIterator
+// shard  ：
 func (a Shards) CreateIterator(ctx context.Context, measurement *influxql.Measurement, opt query.IteratorOptions) (query.Iterator, error) {
+	// 系统数据迭代器
 	switch measurement.SystemIterator {
 	case "_series":
 		return a.createSeriesIterator(ctx, opt)
@@ -1399,6 +1407,7 @@ func (a Shards) CreateIterator(ctx context.Context, measurement *influxql.Measur
 
 	itrs := make([]query.Iterator, 0, len(a))
 	for _, sh := range a {
+		// 创建shard数据的Iterator
 		itr, err := sh.CreateIterator(ctx, measurement, opt)
 		if err != nil {
 			query.Iterators(itrs).Close()
@@ -1427,16 +1436,19 @@ func (a Shards) CreateIterator(ctx context.Context, measurement *influxql.Measur
 	return query.Iterators(itrs).Merge(opt)
 }
 
+// createSeriesIterator 创建Series的Iterator
 func (a Shards) createSeriesIterator(ctx context.Context, opt query.IteratorOptions) (_ query.Iterator, err error) {
 	var (
 		idxs  = make([]Index, 0, len(a))
 		sfile *SeriesFile
 	)
 	for _, sh := range a {
+		// index拷贝一份
 		var idx Index
 		if idx, err = sh.Index(); err == nil {
 			idxs = append(idxs, idx)
 		}
+		// 只返回第一个shard
 		if sfile == nil {
 			sfile, _ = sh.SeriesFile()
 		}

@@ -20,6 +20,7 @@ type CompileOptions struct {
 type Statement interface {
 	// Prepare prepares the statement by mapping shards and finishing the creation
 	// of the query plan.
+	// 通过映射shards，进行准备语句，并完成查询计划的创建。
 	Prepare(shardMapper ShardMapper, opt SelectOptions) (PreparedStatement, error)
 }
 
@@ -1142,17 +1143,31 @@ func (c *compiledStatement) subquery(stmt *influxql.SelectStatement) error {
 	return subquery.compile(stmt)
 }
 
+// Prepare 构建PreparedStatement。
+// 构建过程：
+// 1. 通过MaxBucketsN校验，确定查询逻辑覆盖的TimeRange
+// 2. 根据ExtraIntervals，确定需要进行左右延伸后的TimeRange
+// 3. 根据Source和TimeRange，计算ShardGroup（也就是IteratorCreator，可用于构建扫描的Iterator）
+// 4. 对selection中的field和tag部分，如果存在正则情况，进行正则计算，得到最后匹配的值
+// 5. 验证selection中field和tag部分的类型兼容性是否正确
+// 6. 创建Iterator的构建选项
+// 7. 再次MaxBucketsN校验
+// 8. 获取最终进行projection的所有列名
+// 9. 构造preparedStatement实例
 func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions) (PreparedStatement, error) {
 	// If this is a query with a grouping, there is a bucket limit, and the minimum time has not been specified,
 	// we need to limit the possible time range that can be used when mapping shards but not when actually executing
 	// the select statement. Determine the shard time range here.
 	timeRange := c.TimeRange
+	// 如果起始时间没有设置，但有MaxBucketsN限制，需要根据限制计算出起始值是多少
 	if sopt.MaxBucketsN > 0 && !c.stmt.IsRawQuery && timeRange.MinTimeNano() == influxql.MinTime {
+		// 提取group by time(<time_interval>,<offset_interval>)语句中的time_interval值
 		interval, err := c.stmt.GroupByInterval()
 		if err != nil {
 			return nil, err
 		}
 
+		// 提取group by time(<time_interval>,<offset_interval>)语句中的offset_interval值
 		offset, err := c.stmt.GroupByOffset()
 		if err != nil {
 			return nil, err
@@ -1166,10 +1181,13 @@ func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions)
 					Offset:   offset,
 				},
 			}
+			// 确定last（Max）时间：按窗口对最大时间进行对齐
 			last, _ := opt.Window(c.TimeRange.MaxTimeNano() - 1)
 
 			// Determine the time difference using the number of buckets.
 			// Determine the maximum difference between the buckets based on the end time.
+			// 按窗口化的start、end时间和interval，可以计算出bucket数量
+			// 根据bucket数量和MaxBucketsN，可以反推出start（Min）的时间
 			maxDiff := last - models.MinNanoTime
 			if maxDiff/int64(interval) > int64(sopt.MaxBucketsN) {
 				timeRange.Min = time.Unix(0, models.MinNanoTime)
@@ -1180,8 +1198,12 @@ func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions)
 	}
 
 	// Modify the time range if there are extra intervals and an interval.
+	// 由于数据计算要牵扯到额外的窗口，计算规则：
+	// 1. 升序：向左扩展ExtraIntervals个窗口；
+	// 2. 降序：向右扩展ExtraIntervals个窗口
 	if !c.Interval.IsZero() && c.ExtraIntervals > 0 {
 		if c.Ascending {
+			// Min时间往前回退ExtraIntervals * Interval，即向左扩展ExtraIntervals个窗口
 			newTime := timeRange.Min.Add(time.Duration(-c.ExtraIntervals) * c.Interval.Duration)
 			if !newTime.Before(time.Unix(0, influxql.MinTime).UTC()) {
 				timeRange.Min = newTime
@@ -1189,6 +1211,7 @@ func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions)
 				timeRange.Min = time.Unix(0, influxql.MinTime).UTC()
 			}
 		} else {
+			// Max时间往后前进ExtraIntervals * Interval， 即向右扩展ExtraIntervals个窗口
 			newTime := timeRange.Max.Add(time.Duration(c.ExtraIntervals) * c.Interval.Duration)
 			if !newTime.After(time.Unix(0, influxql.MaxTime).UTC()) {
 				timeRange.Max = newTime
@@ -1199,12 +1222,15 @@ func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions)
 	}
 
 	// Create an iterator creator based on the shards in the cluster.
+	// 时间范围已经确定，根据source（只用db和rp，没有measurement）确定涉及的 query.ShardGroup 信息（也就是IteratorCreator，可以构建Iterator）
+	// 不需要measurement，是因为只要按时间确定shard信息即可
 	shards, err := shardMapper.MapShards(c.stmt.Sources, timeRange, sopt)
 	if err != nil {
 		return nil, err
 	}
 
 	// Rewrite wildcards, if any exist.
+	// 对field，tags部分存在通配符情况，计算出具体值，进行重写
 	mapper := FieldMapper{FieldMapper: shards}
 	stmt, err := c.stmt.RewriteFields(mapper)
 	if err != nil {
@@ -1213,12 +1239,14 @@ func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions)
 	}
 
 	// Validate if the types are correct now that they have been assigned.
+	// 验证类型兼容是否正确
 	if err := validateTypes(stmt); err != nil {
 		shards.Close()
 		return nil, err
 	}
 
 	// Determine base options for iterators.
+	// Iterator的构造选项
 	opt, err := newIteratorOptionsStmt(stmt, sopt)
 	if err != nil {
 		shards.Close()
@@ -1227,6 +1255,7 @@ func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions)
 	opt.StartTime, opt.EndTime = c.TimeRange.MinTimeNano(), c.TimeRange.MaxTimeNano()
 	opt.Ascending = c.Ascending
 
+	// 再次进行桶大小计算，校验桶数据有没有超出阈值
 	if sopt.MaxBucketsN > 0 && !stmt.IsRawQuery && c.TimeRange.MinTimeNano() > influxql.MinTime {
 		interval, err := stmt.GroupByInterval()
 		if err != nil {
@@ -1248,6 +1277,8 @@ func (c *compiledStatement) Prepare(shardMapper ShardMapper, sopt SelectOptions)
 		}
 	}
 
+	// 语句需要返回的列，如果涉及查询多个measurement，且含有相同名称的列，
+	// 在没有指定别名情况下， 变成value，value_1， value_2... 等形式
 	columns := stmt.ColumnNames()
 	return &preparedStatement{
 		stmt:      stmt,

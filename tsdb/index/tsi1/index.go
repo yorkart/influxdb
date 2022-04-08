@@ -124,21 +124,23 @@ var WithSeriesIDCacheSize = func(sz int) IndexOption {
 // Index represents a collection of layered index files and WAL.
 type Index struct {
 	mu         sync.RWMutex
-	partitions []*Partition
+	partitions []*Partition // 默认8个分区
 	opened     bool
 
+	// 嵌套map：measurement name -> tag key -> tag value -> list.Element
 	tagValueCache     *TagValueSeriesIDCache
 	tagValueCacheSize int
 
 	// The following may be set when initializing an Index.
-	path               string      // Root directory of the index partitions.
+	path               string      // Root directory of the index partitions. tsi根目录
 	disableCompactions bool        // Initially disables compactions on the index.
 	maxLogFileSize     int64       // Maximum size of a LogFile before it's compacted.
-	logfileBufferSize  int         // The size of the buffer used by the LogFile.
+	logfileBufferSize  int         // The size of the buffer used by the LogFile. 默认值：12 * buildtsi.defaultBatchSize
 	disableFsync       bool        // Disables flushing buffers and fsyning files. Used when working with indexes offline.
 	logger             *zap.Logger // Index's logger.
 
 	// The following must be set when initializing an Index.
+	// sfile是对_series目录的管理
 	sfile    *tsdb.SeriesFile // series lookup file
 	database string           // Name of database.
 

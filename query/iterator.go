@@ -65,6 +65,7 @@ func (a Iterators) filterNonNil() []Iterator {
 // dataType determines what slice type this set of iterators should be.
 // An iterator type is chosen by looking at the first element in the slice
 // and then returning the data type for that iterator.
+// 确定Iterator的类型， 通过第一个检测就可以
 func (a Iterators) dataType() influxql.DataType {
 	if len(a) == 0 {
 		return influxql.Unknown
@@ -89,6 +90,7 @@ func (a Iterators) dataType() influxql.DataType {
 // coerce forces an array of iterators to be a single type.
 // Iterators that are not of the same type as the first element in the slice
 // will be closed and dropped.
+// 按照Iterators里第一个原始判断数据类型，然后把数组全部强制转换该类型，如果有类型不一致，关闭并忽略
 func (a Iterators) coerce() interface{} {
 	typ := a.dataType()
 	switch typ {
@@ -108,6 +110,9 @@ func (a Iterators) coerce() interface{} {
 
 // Merge combines all iterators into a single iterator.
 // A sorted merge iterator or a merge iterator can be used based on opt.
+// 把Iterators包装成一个Iterator，根据是否MergeSorted采用不同的数据Iterator
+//  NewInterruptIterator -> NewSortedMergeIterator -> Iterators
+//                       -> NewMergeIterator  -> Iterators
 func (a Iterators) Merge(opt IteratorOptions) (Iterator, error) {
 	// Check if this is a call expression.
 	call, ok := opt.Expr.(*influxql.Call)
@@ -558,12 +563,14 @@ type IteratorCreator interface {
 }
 
 // IteratorOptions is an object passed to CreateIterator to specify creation options.
+// IteratorOptions 是传递给CreateIterator的一个对象，用于指定创建选项。
 type IteratorOptions struct {
 	// Expression to iterate for.
 	// This can be VarRef or a Call.
 	Expr influxql.Expr
 
 	// Auxiliary tags or values to also retrieve for the point.
+	// 辅助point检索的tags或values
 	Aux []influxql.VarRef
 
 	// Data sources from which to receive data. This is only used for encoding
@@ -571,6 +578,10 @@ type IteratorOptions struct {
 	Sources []influxql.Source
 
 	// Group by interval and tags.
+	// 都是group by部分，
+	//	Interval 是桶间隔，
+	//	Dimensions 是要group by的tag，
+	//  GroupBy 是Dimensions的map形式，key是tag名称
 	Interval   Interval
 	Dimensions []string            // The final dimensions of the query (stays the same even in subqueries).
 	GroupBy    map[string]struct{} // Dimensions to group points by in intermediate iterators.
@@ -581,9 +592,11 @@ type IteratorOptions struct {
 	FillValue interface{}
 
 	// Condition to filter by.
+	// selection 部分（不包含time range）
 	Condition influxql.Expr
 
 	// Time range for the iterator.
+	// selection 部分中的time range
 	StartTime int64
 	EndTime   int64
 
@@ -591,18 +604,25 @@ type IteratorOptions struct {
 	Ascending bool
 
 	// Limits the number of points per series.
+	// 每个series中，最大返回point数量限制。 Offset 表示从第一行进行偏移（有分页的感觉）
 	Limit, Offset int
 
 	// Limits the number of series.
+	// 最大返回series数量限制
 	SLimit, SOffset int
 
 	// Removes the measurement name. Useful for meta queries.
+	// 从结果查询中删除measurement名称。对元查询很有用。
+	// todo 待确定具体的case
 	StripName bool
 
 	// Removes duplicate rows from raw queries.
+	// 是否要从原始数据中删除重复的行
 	Dedupe bool
 
 	// Determines if this is a query for raw data or an aggregate/selector.
+	// 查询的是原始数据，还是有聚合、过滤
+	// 通常是true，估计因为不具备下推能力，只能原始数据扫描，待确定
 	Ordered bool
 
 	// Limits on the creation of iterators.
@@ -610,6 +630,7 @@ type IteratorOptions struct {
 
 	// If this channel is set and is closed, the iterator should try to exit
 	// and close as soon as possible.
+	// 该值来自于 Context.Done() ，提供请求是否结束的事件
 	InterruptCh <-chan struct{}
 
 	// Authorizer can limit access to data
@@ -619,6 +640,7 @@ type IteratorOptions struct {
 // newIteratorOptionsStmt creates the iterator options from stmt.
 func newIteratorOptionsStmt(stmt *influxql.SelectStatement, sopt SelectOptions) (opt IteratorOptions, err error) {
 	// Determine time range from the condition.
+	// 计算出条件部分：time range和 其他condition
 	valuer := &influxql.NowValuer{Location: stmt.Location}
 	condition, timeRange, err := influxql.ConditionExpr(stmt.Condition, valuer)
 	if err != nil {
@@ -655,6 +677,7 @@ func newIteratorOptionsStmt(stmt *influxql.SelectStatement, sopt SelectOptions) 
 
 	// Always request an ordered output for the top level iterators.
 	// The emitter will always emit points as ordered.
+	// 默认总是让iterator有序的进行输出
 	opt.Ordered = true
 
 	// Determine dimensions.

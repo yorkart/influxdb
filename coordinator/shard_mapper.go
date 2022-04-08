@@ -30,6 +30,8 @@ type LocalShardMapper struct {
 }
 
 // MapShards maps the sources to the appropriate shards into an IteratorCreator.
+// 计算涉及的shard信息，构造LocalShardMapping，并以 query.ShardGroup 接口返回
+// 继承关系：query.IteratorCreator <- IteratorCreator <- query.ShardGroup <- LocalShardMapping
 func (e *LocalShardMapper) MapShards(sources influxql.Sources, t influxql.TimeRange, opt query.SelectOptions) (query.ShardGroup, error) {
 	a := &LocalShardMapping{
 		ShardMap: make(map[Source]tsdb.ShardGroup),
@@ -37,6 +39,7 @@ func (e *LocalShardMapper) MapShards(sources influxql.Sources, t influxql.TimeRa
 
 	tmin := time.Unix(0, t.MinTimeNano())
 	tmax := time.Unix(0, t.MaxTimeNano())
+	// 确定语句涉及的Shard
 	if err := e.mapShards(a, sources, tmin, tmax); err != nil {
 		return nil, err
 	}
@@ -44,6 +47,7 @@ func (e *LocalShardMapper) MapShards(sources influxql.Sources, t influxql.TimeRa
 	return a, nil
 }
 
+// mapShards 根据sources和时间范围，确定涉及的Shard
 func (e *LocalShardMapper) mapShards(a *LocalShardMapping, sources influxql.Sources, tmin, tmax time.Time) error {
 	for _, s := range sources {
 		switch s := s.(type) {
@@ -66,6 +70,7 @@ func (e *LocalShardMapper) mapShards(a *LocalShardMapping, sources influxql.Sour
 					continue
 				}
 
+				// 初始化数组中的capacity数值，只是为了尽可能减少内存拷贝
 				shardIDs := make([]uint64, 0, len(groups[0].Shards)*len(groups))
 				for _, g := range groups {
 					for _, si := range g.Shards {
@@ -84,20 +89,25 @@ func (e *LocalShardMapper) mapShards(a *LocalShardMapping, sources influxql.Sour
 }
 
 // ShardMapper maps data sources to a list of shard information.
+// 维护source和所涉及shardgroup关系
 type LocalShardMapping struct {
+	// ShardMap 每个source对应的涉及检索的shards
 	ShardMap map[Source]tsdb.ShardGroup
 
 	// MinTime is the minimum time that this shard mapper will allow.
 	// Any attempt to use a time before this one will automatically result in using
 	// this time instead.
+	// shard查询的最小时间
 	MinTime time.Time
 
 	// MaxTime is the maximum time that this shard mapper will allow.
 	// Any attempt to use a time after this one will automatically result in using
 	// this time instead.
+	// shard查询的最大时间
 	MaxTime time.Time
 }
 
+// FieldDimensions 根据Measurement，返回dimensions（也就是tags）和fields的类型描述
 func (a *LocalShardMapping) FieldDimensions(m *influxql.Measurement) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
 	source := Source{
 		Database:        m.Database,
@@ -112,6 +122,7 @@ func (a *LocalShardMapping) FieldDimensions(m *influxql.Measurement) (fields map
 	fields = make(map[string]influxql.DataType)
 	dimensions = make(map[string]struct{})
 
+	// 计算measurements，支持正则或精确匹配
 	var measurements []string
 	if m.Regex != nil {
 		measurements = sg.MeasurementsByRegex(m.Regex.Val)
@@ -119,10 +130,13 @@ func (a *LocalShardMapping) FieldDimensions(m *influxql.Measurement) (fields map
 		measurements = []string{m.Name}
 	}
 
+	// 确定了measurements，查找对应的tags和fields信息
+	// 由于是map存储，对于不同的measurement，如果他们存在相同的tag或者field，将被合并
 	f, d, err := sg.FieldDimensions(measurements)
 	if err != nil {
 		return nil, nil, err
 	}
+	// 拷贝一份副本
 	for k, typ := range f {
 		fields[k] = typ
 	}
@@ -163,6 +177,12 @@ func (a *LocalShardMapping) MapType(m *influxql.Measurement, field string) influ
 	return typ
 }
 
+// CreateIterator 如果是
+//  多个Measurement：
+//      有序： NewInterruptIterator -> NewSortedMergeIterator -> Iterators
+//      无序：                      -> NewMergeIterator  -> Iterators
+//  单个Measurement：
+//      _series: seriesPointIterator ->  measurementMergeIterator -> MeasurementIterator
 func (a *LocalShardMapping) CreateIterator(ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions) (query.Iterator, error) {
 	source := Source{
 		Database:        m.Database,
@@ -183,6 +203,7 @@ func (a *LocalShardMapping) CreateIterator(ctx context.Context, m *influxql.Meas
 	}
 
 	if m.Regex != nil {
+		// measurement是正则的话，匹配出所有measurement，并且每个measurement创建一个Iterator
 		measurements := sg.MeasurementsByRegex(m.Regex.Val)
 		inputs := make([]query.Iterator, 0, len(measurements))
 		if err := func() error {
@@ -191,6 +212,7 @@ func (a *LocalShardMapping) CreateIterator(ctx context.Context, m *influxql.Meas
 			for _, measurement := range measurements {
 				mm := m.Clone()
 				mm.Name = measurement // Set the name to this matching regex value.
+				// 创建该measurement的Iterator
 				input, err := sg.CreateIterator(ctx, mm, opt)
 				if err != nil {
 					return err

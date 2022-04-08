@@ -69,6 +69,7 @@ type ShardGroup interface {
 // 预声明执行语句
 type PreparedStatement interface {
 	// Select creates the Iterators that will be used to read the query.
+	// 创建用于读取查询的Iterator，以Cursor形式返回给调用方进行迭代。
 	Select(ctx context.Context) (Cursor, error)
 
 	// Explain outputs the explain plan for this statement.
@@ -83,18 +84,22 @@ type PreparedStatement interface {
 
 // Prepare will compile the statement with the default compile options and
 // then prepare the query.
+// 将使用默认编译选项编译语句，然后准备查询
 func Prepare(stmt *influxql.SelectStatement, shardMapper ShardMapper, opt SelectOptions) (PreparedStatement, error) {
 	// 语句编译，提取、变换相关语句和属性
 	c, err := Compile(stmt, CompileOptions{})
 	if err != nil {
 		return nil, err
 	}
+	// 涉及正则处理、类型校验、ShardGroup（IteratorCreator）计算等处理
 	return c.Prepare(shardMapper, opt)
 }
 
 // Select compiles, prepares, and then initiates execution of the query using the
 // default compile options.
+// 使用默认的编译选项，选择编译、准备，然后开始执行查询。
 func Select(ctx context.Context, stmt *influxql.SelectStatement, shardMapper ShardMapper, opt SelectOptions) (Cursor, error) {
+	// 对语句进行编译
 	s, err := Prepare(stmt, shardMapper, opt)
 	if err != nil {
 		return nil, err
@@ -104,22 +109,28 @@ func Select(ctx context.Context, stmt *influxql.SelectStatement, shardMapper Sha
 	return s.Select(ctx)
 }
 
+// preparedStatement 实现预编译select语句的执行
 type preparedStatement struct {
 	stmt *influxql.SelectStatement
-	opt  IteratorOptions
-	ic   interface {
+	// opt  Iterator 的创建选项
+	opt IteratorOptions
+	// ic IteratorCreator 这里就是 ShardGroup 的实现 coordinator.LocalShardMapping
+	ic interface {
 		IteratorCreator
 		io.Closer
 	}
+	// columns 最终projection的列名
 	columns   []string
 	maxPointN int
-	now       time.Time
+	// now 语句执行时的时间
+	now time.Time
 }
 
 func (p *preparedStatement) Select(ctx context.Context) (Cursor, error) {
 	// TODO(jsternberg): Remove this hacky method of propagating now.
 	// Each level of the query should use a time range discovered during
 	// compilation, but that requires too large of a refactor at the moment.
+	// 简单粗暴实现now值的透传
 	ctx = context.WithValue(ctx, "now", p.now)
 
 	opt := p.opt
@@ -131,6 +142,7 @@ func (p *preparedStatement) Select(ctx context.Context) (Cursor, error) {
 
 	// If a monitor exists and we are told there is a maximum number of points,
 	// register the monitor function.
+	// 添加point扫描限制的监控任务，
 	if m := MonitorFromContext(ctx); m != nil {
 		if p.maxPointN > 0 {
 			monitor := PointLimitMonitor(cur, DefaultStatsInterval, p.maxPointN)
@@ -636,6 +648,7 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 		ctx = tracing.NewContextWithSpan(ctx, span)
 	}
 
+	// 计算FillValue
 	switch opt.Fill {
 	case influxql.NumberFill:
 		if v, ok := opt.FillValue.(int); ok {
@@ -646,6 +659,7 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 	}
 
 	fields := make([]*influxql.Field, 0, len(stmt.Fields)+1)
+	// 判断是否输出时忽略time列，如果不忽略，则要把time列加进来
 	if !stmt.OmitTime {
 		// Add a field with the variable "time" if we have not omitted time.
 		fields = append(fields, &influxql.Field{
@@ -657,6 +671,8 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 	}
 
 	// Iterate through each of the fields to add them to the value mapper.
+	// 遍历每个字段，将它们添加到值映射器。
+	// 遍历stmt.Fields，把Filed信息维护成value mapper形式
 	valueMapper := newValueMapper()
 	for _, f := range stmt.Fields {
 		fields = append(fields, valueMapper.Map(f))
@@ -679,12 +695,15 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 	}
 
 	// Set the aliases on each of the columns to what the final name should be.
+	// 将每个列上的别名设置为最终名称。
+	// 这里顺序添加的处理，不是很好
 	columns := stmt.ColumnNames()
 	for i, f := range fields {
 		f.Alias = columns[i]
 	}
 
 	// Retrieve the refs to retrieve the auxiliary fields.
+	// 辅助field计算
 	var auxKeys []influxql.VarRef
 	if len(valueMapper.refs) > 0 {
 		opt.Aux = make([]influxql.VarRef, 0, len(valueMapper.refs))
@@ -703,6 +722,7 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 	if len(valueMapper.calls) == 0 {
 		// If all of the auxiliary keys are of an unknown type,
 		// do not construct the iterator and return a null cursor.
+		// 此时，所有Type必须确定，否则返回空
 		if !hasValidType(auxKeys) {
 			return newNullCursor(fields), nil
 		}
@@ -895,6 +915,7 @@ type valueMapper struct {
 	// A collection of all of the calls in the table.
 	calls map[*influxql.Call]struct{}
 	// A collection of all of the calls in the table.
+	// table里的VarRef部分
 	refs map[*influxql.VarRef]struct{}
 	i    int
 }
@@ -972,6 +993,7 @@ func (v *valueMapper) rewriteExpr(expr influxql.Expr) influxql.Expr {
 	return &symbol
 }
 
+// validateTypes 对类型进行验证（字段类型、函数参数返回值等）
 func validateTypes(stmt *influxql.SelectStatement) error {
 	valuer := influxql.TypeValuerEval{
 		TypeMapper: influxql.MultiTypeMapper(

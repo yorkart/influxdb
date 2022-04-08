@@ -33,9 +33,13 @@ const (
 )
 
 // SeriesFile represents the section of the index that holds series data.
+// _series目录管理
+// _series/[partition]/[segment|index|.]
+// _series/[00..08]/[0000...0xxx]
+// _series/[00..08]/index
 type SeriesFile struct {
 	path       string
-	partitions []*SeriesPartition
+	partitions []*SeriesPartition // 默认8个
 
 	maxSnapshotConcurrency int
 

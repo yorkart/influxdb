@@ -37,6 +37,8 @@ var (
 )
 
 // SeriesSegment represents a log of series entries.
+// 位置：data/mydb/_series/00/0000
+//                       /00/0001
 type SeriesSegment struct {
 	id   uint16
 	path string
