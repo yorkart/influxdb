@@ -40,8 +40,8 @@ type Index interface {
 	ForEachMeasurementName(fn func(name []byte) error) error
 
 	InitializeSeries(keys, names [][]byte, tags []models.Tags) error
-	CreateSeriesIfNotExists(key, name []byte, tags models.Tags) error
-	CreateSeriesListIfNotExists(keys, names [][]byte, tags []models.Tags) error
+	CreateSeriesIfNotExists(key, name []byte, tags models.Tags) (uint64, error)
+	CreateSeriesListIfNotExists(keys, names [][]byte, tags []models.Tags) ([]uint64, error)
 	DropSeries(seriesID uint64, key []byte, cascade bool) error
 	DropSeriesList(seriesID []uint64, key [][]byte, cascade bool) error
 	DropMeasurementIfSeriesNotExist(name []byte) (bool, error)
@@ -88,6 +88,11 @@ type Index interface {
 	UniqueReferenceID() uintptr
 
 	Rebuild()
+}
+
+type CreatedSeries struct {
+	Created  bool
+	SeriesID uint64
 }
 
 // SeriesElem represents a generic series element.

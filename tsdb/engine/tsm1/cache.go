@@ -205,16 +205,19 @@ type Cache struct {
 	// a large amount memory across shards, we lazily create it.
 	initialize       atomic.Value
 	initializedCount uint32
+
+	sfile *tsdb.SeriesFile
 }
 
 // NewCache returns an instance of a cache which will use a maximum of maxSize bytes of memory.
 // Only used for engine caches, never for snapshots.
-func NewCache(maxSize uint64) *Cache {
+func NewCache(maxSize uint64, sfile *tsdb.SeriesFile) *Cache {
 	c := &Cache{
 		maxSize:      maxSize,
 		store:        emptyStore{},
 		stats:        &CacheStatistics{},
 		lastSnapshot: time.Now(),
+		sfile:        sfile,
 	}
 	c.initialize.Store(&sync.Once{})
 	c.UpdateAge()

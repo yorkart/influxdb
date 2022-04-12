@@ -480,7 +480,8 @@ func (idx *Index) IndexSet() *tsdb.IndexSet {
 func (idx *Index) AddSeries(name string, tags map[string]string) error {
 	t := models.NewTags(tags)
 	key := fmt.Sprintf("%s,%s", name, t.HashKey())
-	return idx.CreateSeriesIfNotExists([]byte(key), []byte(name), t)
+	_, err := idx.CreateSeriesIfNotExists([]byte(key), []byte(name), t)
+	return err
 }
 
 // Reopen closes and re-opens the underlying index, without removing any data.
@@ -581,7 +582,7 @@ func BenchmarkIndexSet_TagSets(b *testing.B) {
 				k := keys[i : i+batchSize]
 				n := names[i : i+batchSize]
 				t := tags[i : i+batchSize]
-				if err := idx.CreateSeriesListIfNotExists(k, n, t); err != nil {
+				if _, err := idx.CreateSeriesListIfNotExists(k, n, t); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -737,7 +738,7 @@ func BenchmarkIndex_ConcurrentWriteQuery(b *testing.B) {
 				k := keys[i : i+batchSize]
 				n := names[i : i+batchSize]
 				t := tags[i : i+batchSize]
-				if err := idx.CreateSeriesListIfNotExists(k, n, t); err != nil {
+				if _, err := idx.CreateSeriesListIfNotExists(k, n, t); err != nil {
 					b.Fatal(err)
 				}
 				once.Do(func() { close(begin) })

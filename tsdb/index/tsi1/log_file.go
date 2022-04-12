@@ -511,21 +511,29 @@ func (f *LogFile) DeleteTagValue(name, key, value []byte) error {
 }
 
 // AddSeriesList adds a list of series to the log file in bulk.
-func (f *LogFile) AddSeriesList(seriesSet *tsdb.SeriesIDSet, names [][]byte, tagsSlice []models.Tags) ([]uint64, error) {
+func (f *LogFile) AddSeriesList(seriesSet *tsdb.SeriesIDSet, names [][]byte, tagsSlice []models.Tags) ([]int64, error) {
 	seriesIDs, err := f.sfile.CreateSeriesListIfNotExists(names, tagsSlice)
 	if err != nil {
 		return nil, err
 	}
 
+	sIDS := make([]int64, len(seriesIDs), len(seriesIDs))
+
 	var writeRequired bool
+	// 索引的WAL日志
 	entries := make([]LogEntry, 0, len(names))
 	seriesSet.RLock()
+	// 相当于遍历每条数据，len(names) == len(tagsSlice)
 	for i := range names {
 		if seriesSet.ContainsNoLock(seriesIDs[i]) {
 			// We don't need to allocate anything for this series.
+			sIDS[i] = int64(seriesIDs[i]) * -1
 			seriesIDs[i] = 0
 			continue
 		}
+
+		sIDS[i] = int64(seriesIDs[i])
+
 		writeRequired = true
 		entries = append(entries, LogEntry{SeriesID: seriesIDs[i], name: names[i], tags: tagsSlice[i], cached: true, batchidx: i})
 	}
@@ -533,7 +541,7 @@ func (f *LogFile) AddSeriesList(seriesSet *tsdb.SeriesIDSet, names [][]byte, tag
 
 	// Exit if all series already exist.
 	if !writeRequired {
-		return seriesIDs, nil
+		return sIDS, nil
 	}
 
 	f.mu.Lock()
@@ -546,6 +554,7 @@ func (f *LogFile) AddSeriesList(seriesSet *tsdb.SeriesIDSet, names [][]byte, tag
 		entry := &entries[i]
 		if seriesSet.ContainsNoLock(entry.SeriesID) {
 			// We don't need to allocate anything for this series.
+			sIDS[i] = int64(seriesIDs[entry.batchidx]) * -1
 			seriesIDs[entry.batchidx] = 0
 			continue
 		}
@@ -560,7 +569,7 @@ func (f *LogFile) AddSeriesList(seriesSet *tsdb.SeriesIDSet, names [][]byte, tag
 	if err := f.FlushAndSync(); err != nil {
 		return nil, err
 	}
-	return seriesIDs, nil
+	return sIDS, nil
 }
 
 // DeleteSeriesID adds a tombstone for a series id.

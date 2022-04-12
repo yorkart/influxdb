@@ -458,11 +458,13 @@ func (s *Shard) SeriesFile() (*SeriesFile, error) {
 }
 
 // IsIdle return true if the shard is not receiving writes and is fully compacted.
+// shard是否空闲：没有执行的压缩任务，cache也是空的
 func (s *Shard) IsIdle() (state bool, reason string) {
 	engine, err := s.Engine()
 	if err != nil {
 		return true, ""
 	}
+	// 没有执行的压缩任务，cache也是空的
 	return engine.IsIdle()
 }
 
@@ -561,6 +563,7 @@ func (s *Shard) WritePointsWithContext(ctx context.Context, points []models.Poin
 	}
 	switch eng := engine.(type) {
 	case contextWriter:
+		// 默认tsm engine是实现了contextWriter接口，所以正常走这个case
 		if err := eng.WritePointsWithContext(ctx, points); err != nil {
 			atomic.AddInt64(&s.stats.WritePointsErr, int64(len(points)))
 			atomic.AddInt64(&s.stats.WriteReqErr, 1)
@@ -653,7 +656,8 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 
 	// Add new series. Check for partial writes.
 	var droppedKeys [][]byte
-	if err := engine.CreateSeriesListIfNotExists(keys, names, tagsSlice); err != nil {
+	var seriesIDs []uint64
+	if seriesIDs, err = engine.CreateSeriesListIfNotExists(keys, names, tagsSlice); err != nil {
 		switch err := err.(type) {
 		// TODO(jmw): why is this a *PartialWriteError when everything else is not a pointer?
 		// Maybe we can just change it to be consistent if we change it also in all
@@ -668,12 +672,17 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 		}
 	}
 
+	if len(seriesIDs) != len(points) {
+		return nil, nil, PartialWriteError{Reason: "", Dropped: len(points)}
+	}
+
 	j = 0
 	for i, p := range points {
 		// Skip any points with only invalid fields.
 		iter := p.FieldIterator()
 		validField := false
 		for iter.Next() {
+			// field名称不能是"time"
 			if bytes.Equal(iter.FieldKey(), timeBytes) {
 				continue
 			}
@@ -713,7 +722,7 @@ func (s *Shard) validateSeriesAndFields(points []models.Point) ([]models.Point, 
 			continue
 		}
 
-		points[j] = points[i]
+		points[j] = models.IndexedPointWrap(points[i], seriesIDs[i])
 		j++
 
 		// Create any fields that are missing.

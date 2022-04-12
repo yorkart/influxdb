@@ -787,6 +787,7 @@ func (c *Compactor) DisableSnapshots() {
 }
 
 // EnableSnapshots allows the compactor to perform snapshots.
+// 打开快照压缩标记
 func (c *Compactor) EnableSnapshots() {
 	c.mu.Lock()
 	c.snapshotsEnabled = true

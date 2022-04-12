@@ -100,7 +100,8 @@ type tsi1Adapter struct {
 }
 
 func (t *tsi1Adapter) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsSlice []models.Tags) (err error) {
-	return t.ti.CreateSeriesListIfNotExists(keys, names, tagsSlice)
+	_, err = t.ti.CreateSeriesListIfNotExists(keys, names, tagsSlice)
+	return err
 }
 
 func (t *tsi1Adapter) Compact() error {

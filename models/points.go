@@ -244,6 +244,24 @@ type point struct {
 	it fieldIterator
 }
 
+type indexedPoint struct {
+	Point
+	seriesID uint64
+}
+
+func IndexedPointWrap(point Point, seriesID uint64) Point {
+	return indexedPoint{Point: point, seriesID: seriesID}
+}
+
+func TryGetSeriesID(point Point) uint64 {
+	switch v := point.(type) {
+	case indexedPoint:
+		return v.seriesID
+	default:
+		return 0
+	}
+}
+
 // type assertions
 var (
 	_ Point         = (*point)(nil)

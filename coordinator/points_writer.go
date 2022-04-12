@@ -95,11 +95,12 @@ func NewPointsWriter() *PointsWriter {
 }
 
 // ShardMapping contains a mapping of shards to points.
+// 用于组织point和shard的关系，即 map<shard, array[point]>
 type ShardMapping struct {
-	n       int
+	n       int                        // 预计point的数量，辅助申请array内存用的
 	Points  map[uint64][]models.Point  // The points associated with a shard ID
 	Shards  map[uint64]*meta.ShardInfo // The shards that have been mapped, keyed by shard ID
-	Dropped []models.Point             // Points that were dropped
+	Dropped []models.Point             // Points that were dropped. 映射的这批point中，校验无效的point
 }
 
 // NewShardMapping creates an empty ShardMapping.
@@ -188,6 +189,10 @@ func (w *PointsWriter) Statistics(tags map[string]string) []models.Statistic {
 // MapShards maps the points contained in wp to a ShardMapping.  If a point
 // maps to a shard group or shard that does not currently exist, it will be
 // created before returning the mapping.
+// 根据写入的point集合数据，维护map<shard, array[point]>映射信息
+// 1. 计算rp
+// 2. 根据points计算涉及的shard group集合
+// 2. 根据shard group信息再计算出point与shard映射关系
 func (w *PointsWriter) MapShards(wp *WritePointsRequest) (*ShardMapping, error) {
 	rp, err := w.MetaClient.RetentionPolicy(wp.Database, wp.RetentionPolicy)
 	if err != nil {
@@ -203,6 +208,7 @@ func (w *PointsWriter) MapShards(wp *WritePointsRequest) (*ShardMapping, error) 
 		min = time.Now().Add(-rp.Duration)
 	}
 
+	// 根据Points计算出涉及的shard group，绑定到list
 	for _, p := range wp.Points {
 		// Either the point is outside the scope of the RP, or we already have
 		// a suitable shard group for the point.
@@ -226,6 +232,7 @@ func (w *PointsWriter) MapShards(wp *WritePointsRequest) (*ShardMapping, error) 
 	mapping := NewShardMapping(len(wp.Points))
 	for _, p := range wp.Points {
 		sg := list.ShardGroupAt(p.Time())
+		// list是根据point来创建的，这里又找不到了，可能是一些非法时间存在
 		if sg == nil {
 			// We didn't create a shard group because the point was outside the
 			// scope of the RP.
@@ -234,7 +241,9 @@ func (w *PointsWriter) MapShards(wp *WritePointsRequest) (*ShardMapping, error) 
 			continue
 		}
 
+		// 根据point哈希定位shard
 		sh := sg.ShardFor(p)
+		// 维护到shard->array[point]映射关系中
 		mapping.MapPoint(&sh, p)
 	}
 	return mapping, nil
@@ -242,19 +251,25 @@ func (w *PointsWriter) MapShards(wp *WritePointsRequest) (*ShardMapping, error) 
 
 // sgList is a wrapper around a meta.ShardGroupInfos where we can also check
 // if a given time is covered by any of the shard groups in the list.
+// 围绕 meta.ShardGroupInfos 进行包装。
 type sgList struct {
+	// shard group描述的集合
 	items meta.ShardGroupInfos
 
 	// needsSort indicates if items has been modified without a sort operation.
+	// 标记 items 被修改过（Add操作），有这个标记说明 items 不确定是否有序，需要进行排序
 	needsSort bool
 
 	// earliest is the last begin time of any item in items.
+	// 即 min(sg.StartTime) from items ，是 items 中小小的起始时间，用于标记所有shard group的左边界
 	earliest time.Time
 
 	// latest is the greatest end time of any item in items.
+	// 即 max(sg.EndTime) from items ，在 items 中最大的结束时间，用于标记所有shard group的右边界
 	latest time.Time
 }
 
+// Covers 按给定的时间，确定是否在时间覆盖范围内
 func (l sgList) Covers(t time.Time) bool {
 	if len(l.items) == 0 {
 		return false
@@ -271,16 +286,19 @@ func (l sgList) Covers(t time.Time) bool {
 //
 //  - a shard group with the earliest end time;
 //  - (assuming identical end times) the shard group with the earliest start time.
+// 按给定的时间，尝试找到对应的shard group。
 func (l sgList) ShardGroupAt(t time.Time) *meta.ShardGroupInfo {
 	if l.items.Len() == 0 {
 		return nil
 	}
 
 	// find the earliest shardgroup that could contain this point using binary search.
+	// 如果items被修改过，需要重新进行排序
 	if l.needsSort {
 		sort.Sort(l.items)
 		l.needsSort = false
 	}
+	// 二分查询时间t第一个落在哪个shard group上（items有序，找到第一个即可）
 	idx := sort.Search(l.items.Len(), func(i int) bool { return l.items[i].EndTime.After(t) })
 
 	// Check if sort.Search actually found the proper shard. It feels like we should also
@@ -294,12 +312,14 @@ func (l sgList) ShardGroupAt(t time.Time) *meta.ShardGroupInfo {
 		// do the correct thing, it may just take a little longer. If we don't
 		// do this, then we may non-silently drop writes we should have accepted.
 
+		// 越界，时间t不在当前shard group集合中
 		if t.Before(l.earliest) || t.After(l.latest) {
 			// t is not in range, we can avoid going through the linear search.
 			return nil
 		}
 
 		// Oh no, we've probably got overlapping shards. Perform a linear search.
+		// 我们可能有重叠的碎片，执行线性搜索。（二分查找失效）
 		for idx = 0; idx < l.items.Len(); idx++ {
 			if l.items[idx].Contains(t) {
 				// Found it!
@@ -316,11 +336,13 @@ func (l sgList) ShardGroupAt(t time.Time) *meta.ShardGroupInfo {
 }
 
 // Add appends a shard group to the list, updating the earliest/latest times of the list if needed.
+// 添加一个shard group到集合， 更新 meta.ShardGroupInfos 的覆盖时间范围
 func (l *sgList) Add(sgi meta.ShardGroupInfo) {
 	l.items = append(l.items, sgi)
 	l.needsSort = true
 
 	// Update our earliest and latest times for l.items
+	// earliest = min(sg.StartTime) from items, latest max(sg.EndTime) from items
 	if l.earliest.IsZero() || l.earliest.After(sgi.StartTime) {
 		l.earliest = sgi.StartTime
 	}
@@ -377,12 +399,14 @@ func (w *PointsWriter) WritePointsPrivilegedWithContext(ctx context.Context, dat
 		retentionPolicy = db.DefaultRetentionPolicy
 	}
 
+	// 计算point和路由shard的映射关系
 	shardMappings, err := w.MapShards(&WritePointsRequest{Database: database, RetentionPolicy: retentionPolicy, Points: points})
 	if err != nil {
 		return err
 	}
 
 	// Write each shard in it's own goroutine and return as soon as one fails.
+	// 每个shard一个goroutine，并行的进行shard写入point
 	ch := make(chan error, len(shardMappings.Points))
 	for shardID, points := range shardMappings.Points {
 		go func(ctx context.Context, shard *meta.ShardInfo, database, retentionPolicy string, points []models.Point) {
@@ -458,6 +482,7 @@ func (w *PointsWriter) writeToShard(shard *meta.ShardInfo, database, retentionPo
 	return w.writeToShardWithContext(context.Background(), shard, database, retentionPolicy, points)
 }
 
+// writeToShardWithContext 将point写对到指定shard中
 func (w *PointsWriter) writeToShardWithContext(ctx context.Context, shard *meta.ShardInfo, database, retentionPolicy string, points []models.Point) error {
 	atomic.AddInt64(&w.stats.PointWriteReqLocal, int64(len(points)))
 
@@ -469,6 +494,7 @@ func (w *PointsWriter) writeToShardWithContext(ctx context.Context, shard *meta.
 		}
 		switch sw := w.TSDBStore.(type) {
 		case shardWriterWithContext:
+			// 正常走这个case，TSDBStore 默认实现为 tsdb.Store
 			if err := sw.WriteToShardWithContext(ctx, shard.ID, points); err != nil {
 				return err
 			}

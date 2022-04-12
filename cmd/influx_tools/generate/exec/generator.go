@@ -145,7 +145,7 @@ func (g *Generator) writeShard(idx seriesIndex, sg gen.SeriesGenerator, id uint6
 		tags = append(tags, sg.Tags())
 
 		if len(keys) == seriesBatchSize {
-			if err := idx.CreateSeriesListIfNotExists(keys, names, tags); err != nil {
+			if _, err := idx.CreateSeriesListIfNotExists(keys, names, tags); err != nil {
 				return err
 			}
 			keys = keys[:0]
@@ -166,7 +166,7 @@ func (g *Generator) writeShard(idx seriesIndex, sg gen.SeriesGenerator, id uint6
 	}
 
 	if len(keys) > seriesBatchSize {
-		if err := idx.CreateSeriesListIfNotExists(keys, names, tags); err != nil {
+		if _, err := idx.CreateSeriesListIfNotExists(keys, names, tags); err != nil {
 			return err
 		}
 	}
@@ -174,7 +174,7 @@ func (g *Generator) writeShard(idx seriesIndex, sg gen.SeriesGenerator, id uint6
 }
 
 type seriesIndex interface {
-	CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsSlice []models.Tags) error
+	CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsSlice []models.Tags) ([]uint64, error)
 }
 
 type seriesFileAdapter struct {
@@ -182,7 +182,6 @@ type seriesFileAdapter struct {
 	buf []byte
 }
 
-func (s *seriesFileAdapter) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsSlice []models.Tags) (err error) {
-	_, err = s.sf.CreateSeriesListIfNotExists(names, tagsSlice)
-	return
+func (s *seriesFileAdapter) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsSlice []models.Tags) ([]uint64, error) {
+	return s.sf.CreateSeriesListIfNotExists(names, tagsSlice)
 }

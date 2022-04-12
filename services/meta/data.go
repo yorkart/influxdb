@@ -1290,12 +1290,13 @@ func normalisedShardDuration(sgd, d time.Duration) time.Duration {
 // because it makes it clear that a ShardGroup has been marked as deleted, and allow the system
 // to be sure that a ShardGroup is not simply missing. If the DeletedAt is set, the system can
 // safely delete any associated shards.
+// 描述shard group元数据
 type ShardGroupInfo struct {
 	ID          uint64
-	StartTime   time.Time
-	EndTime     time.Time
-	DeletedAt   time.Time
-	Shards      []ShardInfo
+	StartTime   time.Time   // shard group起始时间边界
+	EndTime     time.Time   // shard group结束时间边界
+	DeletedAt   time.Time   // 表明shard group在什么时间可以被删除
+	Shards      []ShardInfo // shard成员，OSS版本只有一个shard，集群版本数据会hash分散到没个 ShardInfo 上，（ShardInfo可以多副本）
 	TruncatedAt time.Time
 }
 
@@ -1367,6 +1368,7 @@ type hashIDer interface {
 }
 
 // ShardFor returns the ShardInfo for a Point or other hashIDer.
+// 根据point哈希定位shard
 func (sgi *ShardGroupInfo) ShardFor(p hashIDer) ShardInfo {
 	if len(sgi.Shards) == 1 {
 		return sgi.Shards[0]
@@ -1423,9 +1425,10 @@ func (sgi *ShardGroupInfo) unmarshal(pb *internal.ShardGroupInfo) {
 }
 
 // ShardInfo represents metadata about a shard.
+// 描述一个shard的元数据
 type ShardInfo struct {
 	ID     uint64
-	Owners []ShardOwner
+	Owners []ShardOwner // shard副本在节点上的分布
 }
 
 // OwnedBy determines whether the shard's owner IDs includes nodeID.

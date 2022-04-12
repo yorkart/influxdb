@@ -10,11 +10,14 @@ import (
 
 // epochTracker keeps track of epochs for write and delete operations
 // allowing a delete to block until all previous writes have completed.
+// 基于epoch的事件跟踪。用于管理对数据的write和delete操作，
+// 在没有delete时，write可以顺序执行，
+// 当有delete操作是，delete操作会进行抢占，并把所有delete执行完，在执行后续的write
 type epochTracker struct {
 	mu      sync.Mutex
-	epoch   uint64 // current epoch
-	largest uint64 // largest delete possible
-	writes  int64  // pending writes
+	epoch   uint64 // current epoch 跟踪操作的计数器（write和delete操作）
+	largest uint64 // largest delete possible 最大的delete操作的epoch
+	writes  int64  // pending writes 进行中的写操作
 	// pending deletes waiting on writes
 	deletes map[uint64]*epochDeleteState
 }
@@ -60,6 +63,7 @@ func (e *epochTracker) next() uint64 {
 
 // StartWrite should be called before a write is going to start, and after
 // it has checked for guards.
+// 写操作之前调用，如果有delete的guard，需要pending
 func (e *epochTracker) StartWrite() ([]*guard, uint64) {
 	e.mu.Lock()
 	gen := e.next()
@@ -82,6 +86,7 @@ func (e *epochTracker) StartWrite() ([]*guard, uint64) {
 // EndWrite should be called when the write ends for any reason.
 func (e *epochTracker) EndWrite(gen uint64) {
 	e.mu.Lock()
+	// 此时说明在write过程中，有新的delete产生了，需要等待之前的老的delete都要完成
 	if gen <= e.largest {
 		// TODO(jeff): at the cost of making waitDelete more
 		// complicated, we can keep a sorted slice which would

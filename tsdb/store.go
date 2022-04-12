@@ -91,6 +91,8 @@ type Store struct {
 
 	// Epoch tracker helps serialize writes and deletes that may conflict. It
 	// is stored by shard.
+	// Epoch tracker有助于序列化可能发生冲突的写和删除操作。它由分片存储。
+	// 用于管理对数据进行write和delete的操作时，需要隔离开
 	epochs map[uint64]*epochTracker
 
 	EngineOptions EngineOptions
@@ -1413,9 +1415,11 @@ func (s *Store) WriteToShard(shardID uint64, points []models.Point) error {
 	return s.WriteToShardWithContext(context.Background(), shardID, points)
 }
 
+// WriteToShardWithContext 将points写入对应的shard，如果shard不存在返回报错
 func (s *Store) WriteToShardWithContext(ctx context.Context, shardID uint64, points []models.Point) error {
 	s.mu.RLock()
 
+	// store是否已经关闭
 	select {
 	case <-s.closing:
 		s.mu.RUnlock()
@@ -1429,15 +1433,18 @@ func (s *Store) WriteToShardWithContext(ctx context.Context, shardID uint64, poi
 		return ErrShardNotFound
 	}
 
+	// 对应shard的事件跟踪器
 	epoch := s.epochs[shardID]
 
 	s.mu.RUnlock()
 
 	// enter the epoch tracker
+	// 开启write事件跟踪
 	guards, gen := epoch.StartWrite()
 	defer epoch.EndWrite(gen)
 
 	// wait for any guards before writing the points.
+	// 等待之前的delete数据操作结束
 	for _, guard := range guards {
 		if guard.Matches(points) {
 			guard.Wait()
@@ -1446,7 +1453,9 @@ func (s *Store) WriteToShardWithContext(ctx context.Context, shardID uint64, poi
 
 	// Ensure snapshot compactions are enabled since the shard might have been cold
 	// and disabled by the monitor.
+	// shard是否空闲（没有执行的压缩任务，cache也是空的，即没有数据写入）
 	if isIdle, _ := sh.IsIdle(); isIdle {
+		// 开启压缩任务
 		sh.SetCompactionsEnabled(true)
 	}
 

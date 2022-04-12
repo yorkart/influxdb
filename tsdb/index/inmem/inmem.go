@@ -1176,10 +1176,10 @@ func (idx *ShardIndex) DropMeasurementIfSeriesNotExist(name []byte) (bool, error
 }
 
 // CreateSeriesListIfNotExists creates a list of series if they doesn't exist in bulk.
-func (idx *ShardIndex) CreateSeriesListIfNotExists(keys, names [][]byte, tagsSlice []models.Tags) error {
+func (idx *ShardIndex) CreateSeriesListIfNotExists(keys, names [][]byte, tagsSlice []models.Tags) ([]uint64, error) {
 	keys, names, tagsSlice = idx.assignExistingSeries(idx.id, idx.seriesIDSet, idx.measurements, keys, names, tagsSlice)
 	if len(keys) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	var (
@@ -1235,14 +1235,14 @@ func (idx *ShardIndex) CreateSeriesListIfNotExists(keys, names [][]byte, tagsSli
 	if len(droppedKeys) > 0 {
 		dropped := len(droppedKeys) // number dropped before deduping
 		bytesutil.SortDedup(droppedKeys)
-		return tsdb.PartialWriteError{
+		return nil, tsdb.PartialWriteError{
 			Reason:      reason,
 			Dropped:     dropped,
 			DroppedKeys: droppedKeys,
 		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 // SeriesN returns the number of unique non-tombstoned series local to this shard.
@@ -1260,8 +1260,8 @@ func (idx *ShardIndex) InitializeSeries(keys, names [][]byte, tags []models.Tags
 
 // CreateSeriesIfNotExists creates the provided series on the index if it is not
 // already present.
-func (idx *ShardIndex) CreateSeriesIfNotExists(key, name []byte, tags models.Tags) error {
-	return idx.Index.CreateSeriesListIfNotExists(idx.seriesIDSet, idx.measurements, [][]byte{key}, [][]byte{name}, []models.Tags{tags}, &idx.opt, false)
+func (idx *ShardIndex) CreateSeriesIfNotExists(key, name []byte, tags models.Tags) (uint64, error) {
+	return 0, idx.Index.CreateSeriesListIfNotExists(idx.seriesIDSet, idx.measurements, [][]byte{key}, [][]byte{name}, []models.Tags{tags}, &idx.opt, false)
 }
 
 // TagSets returns a list of tag sets based on series filtering.

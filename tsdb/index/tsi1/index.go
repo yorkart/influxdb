@@ -633,10 +633,10 @@ func (i *Index) DropMeasurement(name []byte) error {
 }
 
 // CreateSeriesListIfNotExists creates a list of series if they doesn't exist in bulk.
-func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsSlice []models.Tags) error {
+func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsSlice []models.Tags) ([]uint64, error) {
 	// All slices must be of equal length.
 	if len(names) != len(tagsSlice) {
-		return errors.New("names/tags length mismatch in index")
+		return nil, errors.New("names/tags length mismatch in index")
 	}
 
 	// We need to move different series into collections for each partition
@@ -644,11 +644,20 @@ func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsS
 	pNames := make([][][]byte, i.PartitionN)
 	pTags := make([][]models.Tags, i.PartitionN)
 
+	pIdIndex := make(map[int]map[int]int)
+	seriesIDs := make([]uint64, len(names), len(names))
+
 	// Determine partition for series using each series key.
 	for ki, key := range keys {
 		pidx := i.partitionIdx(key)
 		pNames[pidx] = append(pNames[pidx], names[ki])
 		pTags[pidx] = append(pTags[pidx], tagsSlice[ki])
+
+		if x, ok := pIdIndex[pidx]; ok {
+			x[len(pNames[pidx])-1] = ki
+		} else {
+			pIdIndex[pidx] = map[int]int{len(pNames[pidx]) - 1: ki}
+		}
 	}
 
 	// Process each subset of series on each partition.
@@ -669,10 +678,13 @@ func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsS
 				ids, err := i.partitions[idx].createSeriesListIfNotExists(pNames[idx], pTags[idx])
 
 				var updateCache bool
-				for _, id := range ids {
-					if id != 0 {
+				for ii, id := range ids {
+					if id > 0 {
 						updateCache = true
-						break
+						//break
+						seriesIDs[pIdIndex[idx][ii]] = uint64(id)
+					} else {
+						seriesIDs[pIdIndex[idx][ii]] = uint64(id * -1)
 					}
 				}
 
@@ -684,7 +696,7 @@ func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsS
 				// Some cached bitset results may need to be updated.
 				i.tagValueCache.RLock()
 				for j, id := range ids {
-					if id == 0 {
+					if id < 0 {
 						continue
 					}
 
@@ -706,7 +718,7 @@ func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsS
 							// and then keep it locked until we're done with all the ids.
 							//
 							// Note: this will only add `id` to the set if it exists.
-							i.tagValueCache.addToSet(name, pair.Key, pair.Value, id) // Takes a lock on the series id set
+							i.tagValueCache.addToSet(name, pair.Key, pair.Value, uint64(id)) // Takes a lock on the series id set
 						}
 					}
 				}
@@ -720,7 +732,7 @@ func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsS
 	// Check for error
 	for i := 0; i < cap(errC); i++ {
 		if err := <-errC; err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -735,14 +747,14 @@ func (i *Index) CreateSeriesListIfNotExists(keys [][]byte, names [][]byte, tagsS
 		i.mSketch.Add(name)
 	}
 
-	return nil
+	return seriesIDs, nil
 }
 
 // CreateSeriesIfNotExists creates a series if it doesn't exist or is deleted.
-func (i *Index) CreateSeriesIfNotExists(key, name []byte, tags models.Tags) error {
+func (i *Index) CreateSeriesIfNotExists(key, name []byte, tags models.Tags) (uint64, error) {
 	ids, err := i.partition(key).createSeriesListIfNotExists([][]byte{name}, []models.Tags{tags})
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	i.mu.Lock()
@@ -750,8 +762,8 @@ func (i *Index) CreateSeriesIfNotExists(key, name []byte, tags models.Tags) erro
 	i.mSketch.Add(name)
 	i.mu.Unlock()
 
-	if ids[0] == 0 {
-		return nil // No new series, nothing further to update.
+	if ids[0] < 0 {
+		return uint64(ids[0] * -1), nil // No new series, nothing further to update.
 	}
 
 	// If there are cached sets for any of the tag pairs, they will need to be
@@ -770,11 +782,11 @@ func (i *Index) CreateSeriesIfNotExists(key, name []byte, tags models.Tags) erro
 			// Need to think on it, but I think taking a lock on each series id set is the way to go.
 			//
 			// Note this will only add `id` to the set if it exists.
-			i.tagValueCache.addToSet(name, pair.Key, pair.Value, ids[0]) // Takes a lock on the series id set
+			i.tagValueCache.addToSet(name, pair.Key, pair.Value, uint64(ids[0])) // Takes a lock on the series id set
 		}
 	}
 	i.tagValueCache.RUnlock()
-	return nil
+	return uint64(ids[0]), nil
 }
 
 // InitializeSeries is a no-op. This only applies to the in-memory index.

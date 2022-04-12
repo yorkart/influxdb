@@ -219,7 +219,7 @@ func NewEngine(id uint64, idx tsdb.Index, path string, walPath string, sfile *ts
 	}
 	fs.tsmMMAPWillNeed = opt.Config.TSMWillNeed
 
-	cache := NewCache(uint64(opt.Config.CacheMaxMemorySize))
+	cache := NewCache(uint64(opt.Config.CacheMaxMemorySize), sfile)
 
 	c := NewCompactor()
 	c.Dir = path
@@ -888,6 +888,7 @@ func (e *Engine) LoadMetadataIndex(shardID uint64, index tsdb.Index) error {
 
 // IsIdle returns true if the cache is empty, there are no running compactions and the
 // shard is fully compacted.
+// 是否空闲标准：没有执行的压缩任务，cache也是空的
 func (e *Engine) IsIdle() (state bool, reason string) {
 	c := []struct {
 		ActiveCompactions *int64
@@ -1278,7 +1279,7 @@ func (e *Engine) addToIndexFromKey(keys [][]byte, fieldTypes []influxql.DataType
 			return err
 		}
 	} else {
-		if err := e.index.CreateSeriesListIfNotExists(keys, names, tags); err != nil {
+		if _, err := e.index.CreateSeriesListIfNotExists(keys, names, tags); err != nil {
 			return err
 		}
 	}
@@ -1293,6 +1294,10 @@ func (e *Engine) addToIndexFromKey(keys [][]byte, fieldTypes []influxql.DataType
 //
 func (e *Engine) WritePoints(points []models.Point) error {
 	return e.WritePointsWithContext(context.Background(), points)
+}
+
+func seriesIDStr(seriesID uint64) string {
+	return strconv.FormatUint(seriesID, 16)
 }
 
 // WritePointsWithContext() writes metadata and point data into the engine.  It
@@ -1318,8 +1323,10 @@ func (e *Engine) WritePointsWithContext(ctx context.Context, points []models.Poi
 	for _, p := range points {
 		// TODO: In the future we'd like to check ctx.Err() for cancellation here.
 		// Beforehand we should measure the performance impact.
+		seriesID := models.TryGetSeriesID(p)
 
-		keyBuf = append(keyBuf[:0], p.Key()...)
+		keyBuf = append(keyBuf[:0], []byte(seriesIDStr(seriesID))...)
+		//keyBuf = append(keyBuf[:0], p.Key()...)
 		keyBuf = append(keyBuf, keyFieldSeparator...)
 		baseLen = len(keyBuf)
 		iter := p.FieldIterator()
@@ -1889,12 +1896,13 @@ func (e *Engine) ForEachMeasurementName(fn func(name []byte) error) error {
 	return e.index.ForEachMeasurementName(fn)
 }
 
-func (e *Engine) CreateSeriesListIfNotExists(keys, names [][]byte, tagsSlice []models.Tags) error {
+func (e *Engine) CreateSeriesListIfNotExists(keys, names [][]byte, tagsSlice []models.Tags) ([]uint64, error) {
 	return e.index.CreateSeriesListIfNotExists(keys, names, tagsSlice)
 }
 
 func (e *Engine) CreateSeriesIfNotExists(key, name []byte, tags models.Tags) error {
-	return e.index.CreateSeriesIfNotExists(key, name, tags)
+	_, err := e.index.CreateSeriesIfNotExists(key, name, tags)
+	return err
 }
 
 // WriteTo is not implemented.
@@ -2988,6 +2996,13 @@ func (e *Engine) buildCursor(ctx context.Context, measurement, seriesKey string,
 	if f == nil {
 		return nil
 	}
+
+	seriesIDs, err := e.sfile.CreateSeriesListIfNotExists([][]byte{[]byte(measurement)}, []models.Tags{tags})
+	if err != nil || len(seriesIDs) == 0 {
+		return nil
+	}
+	seriesID := seriesIDs[0]
+	seriesKey = seriesIDStr(seriesID)
 
 	// Check if we need to perform a cast. Performing a cast in the
 	// engine (if it is possible) is much more efficient than an automatic cast.
