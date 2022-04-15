@@ -1324,6 +1324,7 @@ func (e *Engine) WritePointsWithContext(ctx context.Context, points []models.Poi
 		// TODO: In the future we'd like to check ctx.Err() for cancellation here.
 		// Beforehand we should measure the performance impact.
 		seriesID := models.TryGetSeriesID(p)
+		//fmt.Printf("seriesID: %v, seriesKey:%s\n", seriesID, string(p.Key()))
 
 		keyBuf = append(keyBuf[:0], []byte(seriesIDStr(seriesID))...)
 		//keyBuf = append(keyBuf[:0], p.Key()...)
@@ -1594,10 +1595,22 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 		bytesutil.Sort(seriesKeys)
 	}
 
+	buf := make([]byte, 1024)
+	seriesKeysTSM := make([][]byte, len(seriesKeys), len(seriesKeys))
+	for i, k := range seriesKeys {
+		name, tags := models.ParseKeyBytes(k)
+		sid := e.sfile.SeriesID(name, tags, buf)
+		seriesKeysTSM[i] = []byte(seriesIDStr(sid))
+
+		if !bytesutil.IsSorted(seriesKeysTSM) {
+			bytesutil.Sort(seriesKeysTSM)
+		}
+	}
+
 	// Run the delete on each TSM file in parallel
 	if err := e.FileStore.Apply(func(r TSMFile) error {
 		// See if this TSM file contains the keys and time range
-		minKey, maxKey := seriesKeys[0], seriesKeys[len(seriesKeys)-1]
+		minKey, maxKey := seriesKeysTSM[0], seriesKeysTSM[len(seriesKeysTSM)-1]
 		tsmMin, tsmMax := r.KeyRange()
 
 		tsmMin, _ = SeriesAndFieldFromCompositeKey(tsmMin)
@@ -1616,14 +1629,14 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 			indexKey, _ := r.KeyAt(i)
 			seriesKey, _ := SeriesAndFieldFromCompositeKey(indexKey)
 
-			for j < len(seriesKeys) && bytes.Compare(seriesKeys[j], seriesKey) < 0 {
+			for j < len(seriesKeysTSM) && bytes.Compare(seriesKeysTSM[j], seriesKey) < 0 {
 				j++
 			}
 
-			if j >= len(seriesKeys) {
+			if j >= len(seriesKeysTSM) {
 				break
 			}
-			if bytes.Equal(seriesKeys[j], seriesKey) {
+			if bytes.Equal(seriesKeysTSM[j], seriesKey) {
 				if err := batch.DeleteRange([][]byte{indexKey}, min, max); err != nil {
 					batch.Rollback()
 					return err
@@ -1637,7 +1650,7 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 	}
 
 	// find the keys in the cache and remove them
-	deleteKeys := make([][]byte, 0, len(seriesKeys))
+	deleteKeys := make([][]byte, 0, len(seriesKeysTSM))
 
 	// ApplySerialEntryFn cannot return an error in this invocation.
 	_ = e.Cache.ApplyEntryFn(func(k []byte, _ *entry) error {
@@ -1645,8 +1658,8 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 
 		// Cache does not walk keys in sorted order, so search the sorted
 		// series we need to delete to see if any of the cache keys match.
-		i := bytesutil.SearchBytes(seriesKeys, seriesKey)
-		if i < len(seriesKeys) && bytes.Equal(seriesKey, seriesKeys[i]) {
+		i := bytesutil.SearchBytes(seriesKeysTSM, seriesKey)
+		if i < len(seriesKeysTSM) && bytes.Equal(seriesKey, seriesKeysTSM[i]) {
 			// k is the measurement + tags + sep + field
 			deleteKeys = append(deleteKeys, k)
 		}
@@ -1673,7 +1686,7 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 	// Note: this is inherently racy if writes are occurring to the same measurement/series are
 	// being removed.  A write could occur and exist in the cache at this point, but we
 	// would delete it from the index.
-	minKey := seriesKeys[0]
+	minKey := seriesKeysTSM[0]
 
 	// Apply runs this func concurrently.  The seriesKeys slice is mutated concurrently
 	// by different goroutines setting positions to nil.
@@ -1683,7 +1696,7 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 
 		// Start from the min deleted key that exists in this file.
 		for i := r.Seek(minKey); i < n; i++ {
-			if j >= len(seriesKeys) {
+			if j >= len(seriesKeysTSM) {
 				return nil
 			}
 
@@ -1691,18 +1704,18 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 			seriesKey, _ := SeriesAndFieldFromCompositeKey(indexKey)
 
 			// Skip over any deleted keys that are less than our tsm key
-			cmp := bytes.Compare(seriesKeys[j], seriesKey)
-			for j < len(seriesKeys) && cmp < 0 {
+			cmp := bytes.Compare(seriesKeysTSM[j], seriesKey)
+			for j < len(seriesKeysTSM) && cmp < 0 {
 				j++
-				if j >= len(seriesKeys) {
+				if j >= len(seriesKeysTSM) {
 					return nil
 				}
-				cmp = bytes.Compare(seriesKeys[j], seriesKey)
+				cmp = bytes.Compare(seriesKeysTSM[j], seriesKey)
 			}
 
 			// We've found a matching key, cross it out so we do not remove it from the index.
-			if j < len(seriesKeys) && cmp == 0 {
-				seriesKeys[j] = emptyBytes
+			if j < len(seriesKeysTSM) && cmp == 0 {
+				seriesKeysTSM[j] = emptyBytes
 				j++
 			}
 		}
@@ -1713,8 +1726,8 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 
 	// The seriesKeys slice is mutated if they are still found in the cache.
 	cacheKeys := e.Cache.Keys()
-	for i := 0; i < len(seriesKeys); i++ {
-		seriesKey := seriesKeys[i]
+	for i := 0; i < len(seriesKeysTSM); i++ {
+		seriesKey := seriesKeysTSM[i]
 		// Already crossed out
 		if len(seriesKey) == 0 {
 			continue
@@ -1724,7 +1737,7 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 		if j < len(cacheKeys) {
 			cacheSeriesKey, _ := SeriesAndFieldFromCompositeKey(cacheKeys[j])
 			if bytes.Equal(seriesKey, cacheSeriesKey) {
-				seriesKeys[i] = emptyBytes
+				seriesKeysTSM[i] = emptyBytes
 			}
 		}
 	}
@@ -1732,7 +1745,7 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 	// Have we deleted all values for the series? If so, we need to remove
 	// the series from the index.
 	hasDeleted := false
-	for _, k := range seriesKeys {
+	for _, k := range seriesKeysTSM {
 		if len(k) > 0 {
 			hasDeleted = true
 			break
@@ -1746,7 +1759,7 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 		deleteIDList := make([]uint64, 0, 10000)
 		deleteKeyList := make([][]byte, 0, 10000)
 
-		for _, k := range seriesKeys {
+		for ii, k := range seriesKeys {
 			if len(k) == 0 {
 				continue // This key was wiped because it shouldn't be removed from index.
 			}
@@ -1757,13 +1770,15 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 				continue
 			}
 
+			kTSM := seriesKeysTSM[ii]
+
 			// See if this series was found in the cache earlier
-			i := bytesutil.SearchBytes(deleteKeys, k)
+			i := bytesutil.SearchBytes(deleteKeys, kTSM)
 
 			var hasCacheValues bool
 			// If there are multiple fields, they will have the same prefix.  If any field
 			// has values, then we can't delete it from the index.
-			for i < len(deleteKeys) && bytes.HasPrefix(deleteKeys[i], k) {
+			for i < len(deleteKeys) && bytes.HasPrefix(deleteKeys[i], kTSM) {
 				if e.Cache.Values(deleteKeys[i]).Len() > 0 {
 					hasCacheValues = true
 					break
@@ -2997,12 +3012,13 @@ func (e *Engine) buildCursor(ctx context.Context, measurement, seriesKey string,
 		return nil
 	}
 
-	seriesIDs, err := e.sfile.CreateSeriesListIfNotExists([][]byte{[]byte(measurement)}, []models.Tags{tags})
-	if err != nil || len(seriesIDs) == 0 {
+	// rewrite seriesKey: replace seriesKey with seriesID
+	seriesID := e.sfile.SeriesID([]byte(measurement), tags, nil)
+	if seriesID == 0 {
 		return nil
 	}
-	seriesID := seriesIDs[0]
 	seriesKey = seriesIDStr(seriesID)
+	//fmt.Printf("seriesID: %v, seriesKey:%s, measurement: %s, tags: %v\n", seriesID, seriesKey, measurement, tags)
 
 	// Check if we need to perform a cast. Performing a cast in the
 	// engine (if it is possible) is much more efficient than an automatic cast.
