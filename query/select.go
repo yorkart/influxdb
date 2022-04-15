@@ -47,6 +47,8 @@ type SelectOptions struct {
 // ShardMapper retrieves and maps shards into an IteratorCreator that can later be
 // used for executing queries.
 type ShardMapper interface {
+	// MapShards 根据source、事件范围计算查询涉及的shard信息，并以 query.ShardGroup 接口返回
+	// 用于指导调用方去构造Iterator
 	MapShards(sources influxql.Sources, t influxql.TimeRange, opt SelectOptions) (ShardGroup, error)
 }
 
@@ -65,8 +67,8 @@ type ShardGroup interface {
 	io.Closer
 }
 
-// Select is a prepared statement that is ready to be executed.
-// 预声明执行语句
+// PreparedStatement is a prepared statement that is ready to be executed.
+// 预编译语句
 type PreparedStatement interface {
 	// Select creates the Iterators that will be used to read the query.
 	// 创建用于读取查询的Iterator，以Cursor形式返回给调用方进行迭代。
@@ -658,6 +660,7 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 		opt.FillValue = SkipDefault
 	}
 
+	// 用于输出列field
 	fields := make([]*influxql.Field, 0, len(stmt.Fields)+1)
 	// 判断是否输出时忽略time列，如果不忽略，则要把time列加进来
 	if !stmt.OmitTime {
@@ -672,9 +675,10 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 
 	// Iterate through each of the fields to add them to the value mapper.
 	// 遍历每个字段，将它们添加到值映射器。
-	// 遍历stmt.Fields，把Filed信息维护成value mapper形式
+	// 遍历stmt.Fields，针对 influxql.Expr 的两种情况分析： influxql.VarRef ， influxql.Call
 	valueMapper := newValueMapper()
 	for _, f := range stmt.Fields {
+		// 对输入f，计算出输出的f，添加到fields
 		fields = append(fields, valueMapper.Map(f))
 
 		// If the field is a top() or bottom() call, we need to also add
@@ -695,15 +699,14 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 	}
 
 	// Set the aliases on each of the columns to what the final name should be.
-	// 将每个列上的别名设置为最终名称。
-	// 这里顺序添加的处理，不是很好
+	// 计算输出列的名称，绑定到输出的field上
 	columns := stmt.ColumnNames()
 	for i, f := range fields {
 		f.Alias = columns[i]
 	}
 
 	// Retrieve the refs to retrieve the auxiliary fields.
-	// 辅助field计算
+	// 没有group by情况：计算 Auxiliary field，也就是projection时需要的tag或value
 	var auxKeys []influxql.VarRef
 	if len(valueMapper.refs) > 0 {
 		opt.Aux = make([]influxql.VarRef, 0, len(valueMapper.refs))
@@ -719,6 +722,7 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 	}
 
 	// If there are no calls, then produce an auxiliary cursor.
+	// 有refs，没有calls，可以理解为scan操作：select tag1,tag2,value from measurement
 	if len(valueMapper.calls) == 0 {
 		// If all of the auxiliary keys are of an unknown type,
 		// do not construct the iterator and return a null cursor.
@@ -744,6 +748,7 @@ func buildCursor(ctx context.Context, stmt *influxql.SelectStatement, ic Iterato
 	// It is a selector if it is the only selector call and the call itself
 	// is a selector.
 	selector := len(valueMapper.calls) == 1
+	// 如果只有一个函数调用， 判断在select部分，是否支持该函数（支持max，sum等）
 	if selector {
 		for call := range valueMapper.calls {
 			if !influxql.IsSelector(call) {
@@ -905,17 +910,31 @@ func buildFieldIterator(ctx context.Context, expr influxql.Expr, ic IteratorCrea
 	return input, nil
 }
 
+// valueMapper influxql.SelectStatement.Fields 部分的值映射
+// 也就是projection部分：
+//   select sum("field0"), sum("field1") 中的"field0"、"field1"部分
+//   select "host", "value" 中的"host", "value"部分
 type valueMapper struct {
 	// An index that maps a node's string output to its symbol so that all
 	// nodes with the same signature are mapped the same.
+	// 输入输出符号映射，按照map<influxql.Expr.String(), influxql.VarRef>方式映射，key为输入列，value为输出列描述
+	// 两种情况：
+	// 1. 没有group by时，influxql.Expr 为 influxql.VarRef 是按照 "{Val}::{Type}"方式拼接，示例：host::tag, value::float
+	// 2. 存在group by时，influxql.Expr 为 influxql.Call 是按照 "FunctionName({Val}::{Type})"方式拼接，示例：sum(value::float)
 	symbols map[string]influxql.VarRef
 	// An index that maps a specific expression to a symbol. This ensures that
 	// only expressions that were mapped get symbolized.
+	// 输入输出映射，即原始输入列 influxql.Expr 到输出列 influxql.VarRef 的映射，
+	// 两种情况：
+	// 1. 没有group by时，即select "host", "value"形式，influxql.Expr 为 influxql.VarRef，所以key、value是一致都是 influxql.VarRef 类型
+	// 2. 存在group by时，即select sum("value") 形式，influxql.Expr 为 influxql.Call，而sum("value")结果为float类型，
+	//    所以value的 influxql.VarRef 应该为Float类型，而命名则是按val+seq顺序命名
 	table map[influxql.Expr]influxql.VarRef
 	// A collection of all of the calls in the table.
+	// 当 influxql.Expr 为 influxql.Call 时，把 influxql.Expr 转换为 influxql.Call 保存在该属性中
 	calls map[*influxql.Call]struct{}
 	// A collection of all of the calls in the table.
-	// table里的VarRef部分
+	// 当 influxql.Expr 为 influxql.VarRef 时，把 influxql.Expr 转换为 influxql.VarRef 保存在该属性中
 	refs map[*influxql.VarRef]struct{}
 	i    int
 }
@@ -934,6 +953,7 @@ func (v *valueMapper) Map(field *influxql.Field) *influxql.Field {
 	clone.Expr = influxql.CloneExpr(field.Expr)
 
 	influxql.Walk(v, clone.Expr)
+	// 根据输入field，查找对应输出列的influxql.VarRef，并替换作为输出field
 	clone.Expr = influxql.RewriteExpr(clone.Expr, v.rewriteExpr)
 	return &clone
 }

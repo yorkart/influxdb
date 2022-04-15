@@ -30,7 +30,7 @@ type LocalShardMapper struct {
 }
 
 // MapShards maps the sources to the appropriate shards into an IteratorCreator.
-// 计算涉及的shard信息，构造LocalShardMapping，并以 query.ShardGroup 接口返回
+// 计算查询涉及的shard信息，构造LocalShardMapping，并以 query.ShardGroup 接口返回
 // 继承关系：query.IteratorCreator <- IteratorCreator <- query.ShardGroup <- LocalShardMapping
 func (e *LocalShardMapper) MapShards(sources influxql.Sources, t influxql.TimeRange, opt query.SelectOptions) (query.ShardGroup, error) {
 	a := &LocalShardMapping{
@@ -91,7 +91,7 @@ func (e *LocalShardMapper) mapShards(a *LocalShardMapping, sources influxql.Sour
 // ShardMapper maps data sources to a list of shard information.
 // 维护source和所涉及shardgroup关系
 type LocalShardMapping struct {
-	// ShardMap 每个source对应的涉及检索的shards
+	// ShardMap 每个source对应的涉及检索的shard group集合
 	ShardMap map[Source]tsdb.ShardGroup
 
 	// MinTime is the minimum time that this shard mapper will allow.
@@ -114,6 +114,7 @@ func (a *LocalShardMapping) FieldDimensions(m *influxql.Measurement) (fields map
 		RetentionPolicy: m.RetentionPolicy,
 	}
 
+	// source对应的shard group
 	sg := a.ShardMap[source]
 	if sg == nil {
 		return

@@ -571,6 +571,7 @@ type IteratorOptions struct {
 
 	// Auxiliary tags or values to also retrieve for the point.
 	// 辅助point检索的tags或values
+	// 最终需要进行projection涉及的字段
 	Aux []influxql.VarRef
 
 	// Data sources from which to receive data. This is only used for encoding

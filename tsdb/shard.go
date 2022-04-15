@@ -1404,7 +1404,7 @@ func (a Shards) CallType(name string, args []influxql.DataType) (influxql.DataTy
 	return typmap.CallType(name, args)
 }
 
-// CreateIterator 创建measurement下的数据筛选Iterator
+// CreateIterator 创建针对一个measurement下的数据筛选Iterator
 // _series: tsdb.seriesPointIterator ->  tsdb.measurementMergeIterator -> MeasurementIterator
 // shard  ：
 func (a Shards) CreateIterator(ctx context.Context, measurement *influxql.Measurement, opt query.IteratorOptions) (query.Iterator, error) {
