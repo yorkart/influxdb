@@ -59,18 +59,23 @@ func (q *arrayCursorIterator) Next(ctx context.Context, r *tsdb.CursorRequest) (
 	opt.StartTime = r.StartTime
 	opt.EndTime = r.EndTime
 
+	// for prometheus read(case: TestServer_Prometheus_Read)
+	seriesID := q.e.sfile.SeriesID(r.Name, r.Tags, nil)
+	name := []byte(SeriesIDStr(seriesID))
+	tags := models.Tags{}
+
 	// Return appropriate cursor based on type.
 	switch f.Type {
 	case influxql.Float:
-		return q.buildFloatArrayCursor(ctx, r.Name, r.Tags, r.Field, opt), nil
+		return q.buildFloatArrayCursor(ctx, name, tags, r.Field, opt), nil
 	case influxql.Integer:
-		return q.buildIntegerArrayCursor(ctx, r.Name, r.Tags, r.Field, opt), nil
+		return q.buildIntegerArrayCursor(ctx, name, tags, r.Field, opt), nil
 	case influxql.Unsigned:
-		return q.buildUnsignedArrayCursor(ctx, r.Name, r.Tags, r.Field, opt), nil
+		return q.buildUnsignedArrayCursor(ctx, name, tags, r.Field, opt), nil
 	case influxql.String:
-		return q.buildStringArrayCursor(ctx, r.Name, r.Tags, r.Field, opt), nil
+		return q.buildStringArrayCursor(ctx, name, tags, r.Field, opt), nil
 	case influxql.Boolean:
-		return q.buildBooleanArrayCursor(ctx, r.Name, r.Tags, r.Field, opt), nil
+		return q.buildBooleanArrayCursor(ctx, name, tags, r.Field, opt), nil
 	default:
 		panic(fmt.Sprintf("unreachable: %T", f.Type))
 	}

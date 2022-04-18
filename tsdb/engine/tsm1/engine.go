@@ -1296,8 +1296,8 @@ func (e *Engine) WritePoints(points []models.Point) error {
 	return e.WritePointsWithContext(context.Background(), points)
 }
 
-func seriesIDStr(seriesID uint64) string {
-	return strconv.FormatUint(seriesID, 16)
+func SeriesIDStr(seriesID uint64) string {
+	return strconv.FormatUint(seriesID, 32)
 }
 
 // WritePointsWithContext() writes metadata and point data into the engine.  It
@@ -1326,7 +1326,7 @@ func (e *Engine) WritePointsWithContext(ctx context.Context, points []models.Poi
 		seriesID := models.TryGetSeriesID(p)
 		//fmt.Printf("seriesID: %v, seriesKey:%s\n", seriesID, string(p.Key()))
 
-		keyBuf = append(keyBuf[:0], []byte(seriesIDStr(seriesID))...)
+		keyBuf = append(keyBuf[:0], []byte(SeriesIDStr(seriesID))...)
 		//keyBuf = append(keyBuf[:0], p.Key()...)
 		keyBuf = append(keyBuf, keyFieldSeparator...)
 		baseLen = len(keyBuf)
@@ -1600,7 +1600,7 @@ func (e *Engine) deleteSeriesRange(seriesKeys [][]byte, min, max int64) error {
 	for i, k := range seriesKeys {
 		name, tags := models.ParseKeyBytes(k)
 		sid := e.sfile.SeriesID(name, tags, buf)
-		seriesKeysTSM[i] = []byte(seriesIDStr(sid))
+		seriesKeysTSM[i] = []byte(SeriesIDStr(sid))
 
 		if !bytesutil.IsSorted(seriesKeysTSM) {
 			bytesutil.Sort(seriesKeysTSM)
@@ -3017,7 +3017,7 @@ func (e *Engine) buildCursor(ctx context.Context, measurement, seriesKey string,
 	if seriesID == 0 {
 		return nil
 	}
-	seriesKey = seriesIDStr(seriesID)
+	seriesKey = SeriesIDStr(seriesID)
 	//fmt.Printf("seriesID: %v, seriesKey:%s, measurement: %s, tags: %v\n", seriesID, seriesKey, measurement, tags)
 
 	// Check if we need to perform a cast. Performing a cast in the
